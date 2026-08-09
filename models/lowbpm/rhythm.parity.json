@@ -1,0 +1,24 @@
+{
+  "source": "v7.0/models/lowbpm/rhythm_model",
+  "destination": "models/lowbpm/rhythm.keras",
+  "source_sha256": "c9b0b1cb68f139ca6fabd5fc1bf749c83a75df258c981d31f183eee8d1dc0b83",
+  "destination_sha256": "93cee6963cc2a02cde73a459db812f5771b8dd658a0e51380cce5570108ad0f0",
+  "seed": 2026,
+  "probe_shapes": [
+    [
+      2,
+      16,
+      7,
+      32,
+      2
+    ],
+    [
+      2,
+      16,
+      7
+    ]
+  ],
+  "max_absolute_error": 0.0,
+  "tensorflow_version": "2.20.0",
+  "keras_version": "3.15.1"
+}

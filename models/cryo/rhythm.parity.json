@@ -1,0 +1,24 @@
+{
+  "source": "v7.0/models/cryo/rhythm_model",
+  "destination": "models/cryo/rhythm.keras",
+  "source_sha256": "409bb26ccaae708ea0ac505fe56fcb8291424469b2e92e8850267dfb44060661",
+  "destination_sha256": "1bb89c68b341890c1efbf49163dd418f6832ed043f8ce9176bff84d6b6d2a73b",
+  "seed": 2026,
+  "probe_shapes": [
+    [
+      2,
+      16,
+      7,
+      32,
+      2
+    ],
+    [
+      2,
+      16,
+      7
+    ]
+  ],
+  "max_absolute_error": 0.0,
+  "tensorflow_version": "2.20.0",
+  "keras_version": "3.15.1"
+}

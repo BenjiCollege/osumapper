@@ -1,0 +1,24 @@
+{
+  "source": "v7.0/models/vtuber/rhythm_model",
+  "destination": "models/vtuber/rhythm.keras",
+  "source_sha256": "1ca132f69f06323ba7c5fe1d7fe921455b7618f093f7d03410953819d6ebf502",
+  "destination_sha256": "c328c29a8992819bee64cbccf520a4d32e3a5a8e869170be11b1d8992b8217d3",
+  "seed": 2026,
+  "probe_shapes": [
+    [
+      2,
+      16,
+      7,
+      32,
+      2
+    ],
+    [
+      2,
+      16,
+      7
+    ]
+  ],
+  "max_absolute_error": 0.0,
+  "tensorflow_version": "2.20.0",
+  "keras_version": "3.15.1"
+}

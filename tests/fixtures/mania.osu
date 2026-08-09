@@ -1,0 +1,33 @@
+osu file format v14
+
+[General]
+AudioFilename: audio.wav
+Mode: 3
+SampleSet: Soft
+
+[Metadata]
+Title:Safety Baseline
+TitleUnicode:Safety Baseline
+Artist:Fixture Artist
+ArtistUnicode:Fixture Artist
+Creator:Fixture Mapper
+Version:Mania 4K
+Source:
+Tags:fixture mania
+
+[Difficulty]
+HPDrainRate:5
+CircleSize:4
+OverallDifficulty:7
+ApproachRate:5
+SliderMultiplier:1.4
+SliderTickRate:1
+
+[Events]
+
+[TimingPoints]
+0,500,4,2,1,100,1,0
+
+[HitObjects]
+64,192,500,1,0,0:0:0:0:
+192,192,1000,128,0,1500:0:0:0:0:

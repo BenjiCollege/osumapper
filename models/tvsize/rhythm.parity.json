@@ -1,0 +1,24 @@
+{
+  "source": "v7.0/models/tvsize/rhythm_model",
+  "destination": "models/tvsize/rhythm.keras",
+  "source_sha256": "b4f2d24ce7272ebf5ec52461b6ff96d59598abe62b22a117e5ef2bf983009285",
+  "destination_sha256": "e2eb97e91518ae9afcaa0d21f7fdecb19e9d5f7e60201cab3ed250b21b9efc39",
+  "seed": 2026,
+  "probe_shapes": [
+    [
+      2,
+      16,
+      7,
+      32,
+      2
+    ],
+    [
+      2,
+      16,
+      7
+    ]
+  ],
+  "max_absolute_error": 0.0,
+  "tensorflow_version": "2.20.0",
+  "keras_version": "3.15.1"
+}

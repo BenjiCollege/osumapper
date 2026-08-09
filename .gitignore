@@ -55,6 +55,20 @@ v*.*/logs/
 *.sublime-workspace
 .vscode/
 
+# modern Python workspace
+.venv/
+.bootstrap/
+.uv-cache/
+.uv-python/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+*.egg-info/
+
+# generated modern artifacts
+output/
+
 # local reference files
 full_maplist.txt
 osunn.pptx

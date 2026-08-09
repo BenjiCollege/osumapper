@@ -1,0 +1,33 @@
+osu file format v14
+
+[General]
+AudioFilename: audio.wav
+Mode: 2
+SampleSet: Soft
+
+[Metadata]
+Title:Safety Baseline
+TitleUnicode:Safety Baseline
+Artist:Fixture Artist
+ArtistUnicode:Fixture Artist
+Creator:Fixture Mapper
+Version:Catch
+Source:
+Tags:fixture catch
+
+[Difficulty]
+HPDrainRate:5
+CircleSize:5
+OverallDifficulty:6
+ApproachRate:8
+SliderMultiplier:1.5
+SliderTickRate:1
+
+[Events]
+
+[TimingPoints]
+0,600,4,2,1,100,1,0
+
+[HitObjects]
+96,192,600,1,0,0:0:0:0:
+416,192,1200,2,0,L|256:192,1,150,0|0,0:0|0:0,0:0:0:0:

@@ -1,0 +1,51 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "osumapper"
+version = "8.0.0a1"
+description = "Modern, reproducible osu! beatmap generation with osu!lazer package support"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+license = { file = "LICENSE" }
+authors = [{ name = "osumapper contributors" }]
+dependencies = [
+  "librosa>=0.11,<1",
+  "matplotlib>=3.9,<4",
+  "numpy>=1.26.4,<3",
+  "scikit-learn>=1.5,<2",
+  "tensorflow>=2.18,<2.21",
+  "tf-keras>=2.18,<2.21",
+  "tkinterdnd2>=0.4,<1",
+]
+
+[project.scripts]
+osumapper = "osumapper.cli:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3,<10",
+  "ruff>=0.11,<1",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/osumapper"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "ml: requires TensorFlow and runs model compatibility checks",
+]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["v6.2", "v7.0", ".bootstrap", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.uv]
+default-groups = ["dev"]

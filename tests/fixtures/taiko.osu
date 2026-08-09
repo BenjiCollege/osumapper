@@ -1,0 +1,33 @@
+osu file format v14
+
+[General]
+AudioFilename: audio.wav
+Mode: 1
+SampleSet: Drum
+
+[Metadata]
+Title:Safety Baseline
+TitleUnicode:Safety Baseline
+Artist:Fixture Artist
+ArtistUnicode:Fixture Artist
+Creator:Fixture Mapper
+Version:Taiko
+Source:
+Tags:fixture taiko
+
+[Difficulty]
+HPDrainRate:5
+CircleSize:5
+OverallDifficulty:7
+ApproachRate:8
+SliderMultiplier:1.4
+SliderTickRate:1
+
+[Events]
+
+[TimingPoints]
+0,400,4,3,1,100,1,0
+
+[HitObjects]
+256,192,400,1,0,0:0:0:0:
+256,192,800,1,8,0:0:0:0:

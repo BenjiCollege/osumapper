@@ -1,0 +1,24 @@
+{
+  "source": "v7.0/models/sota/rhythm_model",
+  "destination": "models/sota/rhythm.keras",
+  "source_sha256": "eb04c9d28359caa4545d01be16b22b53382aa2095f33897318332a3e8db16f8f",
+  "destination_sha256": "e4200ec0c39718b86fb263c009e80211a3315ff166dda8239f54d2e3a5f8f4fe",
+  "seed": 2026,
+  "probe_shapes": [
+    [
+      2,
+      16,
+      7,
+      32,
+      2
+    ],
+    [
+      2,
+      16,
+      7
+    ]
+  ],
+  "max_absolute_error": 0.0,
+  "tensorflow_version": "2.20.0",
+  "keras_version": "3.15.1"
+}

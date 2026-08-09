@@ -1,0 +1,24 @@
+{
+  "source": "v7.0/models/hard/rhythm_model",
+  "destination": "models/hard/rhythm.keras",
+  "source_sha256": "097c91fb313345a81486686754331b4f7a0290ffa19221eec9507c3f9c097cd7",
+  "destination_sha256": "76e5f269d5f5ad2e59a3c35e4589156401925e4211f544ce423db24e3792b9d8",
+  "seed": 2026,
+  "probe_shapes": [
+    [
+      2,
+      16,
+      7,
+      32,
+      2
+    ],
+    [
+      2,
+      16,
+      7
+    ]
+  ],
+  "max_absolute_error": 0.0,
+  "tensorflow_version": "2.20.0",
+  "keras_version": "3.15.1"
+}

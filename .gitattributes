@@ -1,0 +1,21 @@
+* text=auto
+.gitattributes text eol=lf
+.gitignore text eol=lf
+.python-version text eol=lf
+uv.lock text eol=lf
+*.py text eol=lf
+*.toml text eol=lf
+*.md text eol=lf
+*.json text eol=lf
+*.osu text eol=crlf
+*.ipynb text eol=lf
+*.npz binary
+*.npy binary
+*.keras binary
+*.h5 binary
+*.dll binary
+*.exe binary
+*.jpg binary
+*.woff binary
+*.woff2 binary
+*.otf binary
