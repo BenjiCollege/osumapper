@@ -8,7 +8,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from osumapper import __version__
+from osumapper import (
+    __maintainer__,
+    __original_author__,
+    __original_project__,
+    __version__,
+)
 from osumapper.config import GameMode, GenerationConfig
 from osumapper.engine import generate_document
 from osumapper.errors import OsumapperError
@@ -78,7 +83,8 @@ def _build_parser() -> argparse.ArgumentParser:
 
     subparsers.add_parser("doctor", help="inspect the local runtime and installation")
     subparsers.add_parser("presets", help="list generation presets")
-    subparsers.add_parser("ui", help="open the local file-picker interface")
+    subparsers.add_parser("ui", help="open the local drag-and-drop interface")
+    subparsers.add_parser("credits", help="show original-project attribution")
 
     models = subparsers.add_parser("models", help="migrate or verify legacy rhythm models")
     models_sub = models.add_subparsers(dest="models_command", required=True)
@@ -171,7 +177,14 @@ def _doctor() -> int:
         "legacy_models": len(legacy_model_paths()),
         "dependencies": {
             name: bool(importlib.util.find_spec(name))
-            for name in ("numpy", "librosa", "sklearn", "matplotlib", "tensorflow")
+            for name in (
+                "numpy",
+                "librosa",
+                "sklearn",
+                "matplotlib",
+                "tensorflow",
+                "tkinterdnd2",
+            )
         },
     }
     print(json.dumps(checks, indent=2))
@@ -215,6 +228,15 @@ def _stable_scan(args: argparse.Namespace) -> int:
     return 0
 
 
+def _credits() -> int:
+    print(f"osumapper {__version__}")
+    print(f"Original creator: {__original_author__}")
+    print(f"Original project: {__original_project__}")
+    print(f"2026 modernization: {__maintainer__} and contributors")
+    print("This package is a maintained derivative of the original project.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -226,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "presets":
             print("\n".join(preset_names()))
             return 0
+        if args.command == "credits":
+            return _credits()
         if args.command == "models":
             return _models(args)
         if args.command == "stable-scan":

@@ -1,5 +1,10 @@
 # Legacy baseline
 
+The original osumapper project was created by
+[kotritrona](https://github.com/kotritrona) and published at
+[github.com/kotritrona/osumapper](https://github.com/kotritrona/osumapper). The
+legacy source and trained assets preserved here come from that upstream work.
+
 The historical implementations remain in their original repository locations:
 
 - [`v6.2/`](../v6.2/)

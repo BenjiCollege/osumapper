@@ -1,0 +1,21 @@
+osumapper
+Copyright and attribution notice
+
+Original project created by kotritrona:
+https://github.com/kotritrona/osumapper
+
+The original project includes its model architecture, trained model assets,
+generation concepts, presets, historical source code, and documentation.
+
+This distribution contains modifications made in 2026 by Gerardo (Benji) Colegio
+and contributors to modernize runtime compatibility, packaging, safety, testing,
+command-line use, graphical use, model storage, and osu!lazer interoperability.
+
+The historical v6.2 and v7.0 source trees are retained as legacy snapshots. The
+modern application is a derivative work and does not claim authorship of the
+original osumapper project.
+
+TimingAnlyz was credited by the upstream project to statementreply:
+https://osu.ppy.sh/users/126198
+
+This notice is informational and does not modify the Apache License, Version 2.0.

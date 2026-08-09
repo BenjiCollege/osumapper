@@ -5,11 +5,22 @@ build-backend = "hatchling.build"
 [project]
 name = "osumapper"
 version = "8.0.0a1"
-description = "Modern, reproducible osu! beatmap generation with osu!lazer package support"
+description = "A maintained osu!lazer modernization of kotritrona's osumapper"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"
-license = { file = "LICENSE" }
-authors = [{ name = "osumapper contributors" }]
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "kotritrona" }]
+maintainers = [{ name = "Gerardo (Benji) Colegio" }]
+keywords = ["osu", "osu-lazer", "beatmap", "music", "tensorflow", "keras"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Sound/Audio",
+  "Typing :: Typed",
+]
 dependencies = [
   "librosa>=0.11,<1",
   "matplotlib>=3.9,<4",
@@ -19,6 +30,11 @@ dependencies = [
   "tf-keras>=2.18,<2.21",
   "tkinterdnd2>=0.4,<1",
 ]
+
+[project.urls]
+"Original project" = "https://github.com/kotritrona/osumapper"
+"Original creator" = "https://github.com/kotritrona"
+"Original documentation" = "https://github.com/kotritrona/osumapper/wiki"
 
 [project.scripts]
 osumapper = "osumapper.cli:main"
