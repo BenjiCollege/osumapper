@@ -221,6 +221,11 @@ representative difficulty per beatmap folder by default; enable **Every
 difficulty** to queue all `.osu` files. Duplicate paths are ignored and existing
 output names receive a safe numeric suffix instead of being overwritten.
 
+When Studio runs under WSL, Windows paths such as `C:\Users\...\Downloads\song.mp3`
+are translated automatically to `/mnt/c/...`. The file picker starts in the
+Windows Downloads directory. If WSLg does not deliver an Explorer drag event,
+choose **Paste path** and paste the Windows path directly.
+
 Use **Clear queue** when you are ready for another song. The queue shows each
 item's state and output, can be stopped, and can retry failed or stopped items.
 Generation controls expose the preset, ruleset, seed, flow/rhythm engines, modern

@@ -3,16 +3,27 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from osumapper.ui import (
     GenerationOptions,
     build_generate_command,
     discover_inputs,
+    normalize_input_path,
     unique_output_path,
 )
 
 
 class UiHelperTests(unittest.TestCase):
+    @patch("osumapper.ui._running_under_wsl", return_value=True)
+    def test_windows_download_path_is_translated_for_wsl(self, _wsl) -> None:
+        translated = normalize_input_path(r'"C:\Users\bcten\Downloads\CRAZY_spotdown.org.mp3"')
+
+        self.assertEqual(
+            translated,
+            Path("/mnt/c/Users/bcten/Downloads/CRAZY_spotdown.org.mp3"),
+        )
+
     def test_folder_discovery_groups_difficulties_and_keeps_audio_only_files(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

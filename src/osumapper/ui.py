@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import subprocess
 import sys
 import threading
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Any
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -76,11 +77,49 @@ class QueueEntry:
     output: Path | None = None
 
 
-def discover_inputs(paths: list[Path], *, all_difficulties: bool = False) -> list[Path]:
+_WINDOWS_DRIVE_PATH = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<tail>.*)$")
+
+
+def _running_under_wsl() -> bool:
+    return bool(os.environ.get("WSL_DISTRO_NAME") or os.environ.get("WSL_INTEROP"))
+
+
+def normalize_input_path(value: str | Path) -> Path:
+    raw = str(value).strip().strip('"')
+    if not _running_under_wsl():
+        return Path(raw)
+    normalized = raw.replace("\\", "/")
+    match = _WINDOWS_DRIVE_PATH.match(normalized)
+    if match:
+        return Path("/mnt") / match.group("drive").casefold() / match.group("tail")
+    lowered = normalized.casefold()
+    for prefix in ("//wsl.localhost/", "//wsl$/"):
+        if lowered.startswith(prefix):
+            parts = normalized[len(prefix) :].split("/", 1)
+            return Path("/" + parts[1]) if len(parts) == 2 else Path("/")
+    return Path(normalized)
+
+
+def _default_input_directory() -> Path | None:
+    if not _running_under_wsl():
+        return None
+    users = Path("/mnt/c/Users")
+    if not users.is_dir():
+        return None
+    ignored = {"default", "default user", "public", "all users"}
+    candidates = [
+        path / "Downloads"
+        for path in users.iterdir()
+        if path.is_dir() and path.name.casefold() not in ignored and (path / "Downloads").is_dir()
+    ]
+    return sorted(candidates, key=lambda path: str(path).casefold())[0] if candidates else None
+
+
+def discover_inputs(paths: list[str | Path], *, all_difficulties: bool = False) -> list[Path]:
     """Expand dropped files/folders into a stable, duplicate-free generation queue."""
     discovered: list[Path] = []
     for candidate in paths:
-        path = candidate.expanduser().resolve()
+        path = normalize_input_path(candidate).expanduser().resolve()
         if path.is_file():
             if path.suffix.casefold() in SUPPORTED_INPUTS:
                 discovered.append(path)
@@ -367,6 +406,7 @@ class OsumapperStudio:
         ttk.Button(controls, text="Add folder", command=self._choose_folder).pack(
             side="left", padx=6
         )
+        ttk.Button(controls, text="Paste path", command=self._paste_path).pack(side="left")
         ttk.Button(controls, text="Remove", command=self._remove_selected).pack(side="left")
         ttk.Button(controls, text="Clear queue", command=self._clear_queue).pack(
             side="left", padx=6
@@ -704,19 +744,34 @@ class OsumapperStudio:
         ttk.Button(row, text="…", width=3, command=command).pack(side="left", padx=(5, 0))
 
     def _choose_files(self) -> None:
+        initial = _default_input_directory()
         selected = filedialog.askopenfilenames(
             title="Add beatmaps or audio",
+            initialdir=str(initial) if initial is not None else None,
             filetypes=[
                 ("osu! and audio", "*.osz *.osu *.mp3 *.ogg *.wav *.flac *.m4a *.aac *.opus"),
                 ("All files", "*.*"),
             ],
         )
-        self._add_paths([Path(value) for value in selected])
+        self._add_paths(list(selected))
 
     def _choose_folder(self) -> None:
-        selected = filedialog.askdirectory(title="Queue a folder")
+        initial = _default_input_directory()
+        selected = filedialog.askdirectory(
+            title="Queue a folder",
+            initialdir=str(initial) if initial is not None else None,
+        )
         if selected:
-            self._add_paths([Path(selected)])
+            self._add_paths([selected])
+
+    def _paste_path(self) -> None:
+        selected = simpledialog.askstring(
+            "Add Windows or WSL path",
+            "Paste an audio, .osu, .osz, or folder path:",
+            parent=self.root,
+        )
+        if selected:
+            self._add_paths([selected])
 
     def _choose_output_folder(self) -> None:
         self._choose_directory(self.output_dir, "Choose generated-package folder")
@@ -737,9 +792,9 @@ class OsumapperStudio:
             variable.set(selected)
 
     def _accept_drop(self, event: tk.Event) -> None:
-        self._add_paths([Path(value) for value in self.root.tk.splitlist(event.data)])
+        self._add_paths(list(self.root.tk.splitlist(event.data)))
 
-    def _add_paths(self, paths: list[Path]) -> None:
+    def _add_paths(self, paths: list[str | Path]) -> None:
         inputs = discover_inputs(paths, all_difficulties=self.all_difficulties.get())
         existing = {os.path.normcase(str(entry.source)) for entry in self.entries.values()}
         added = 0
