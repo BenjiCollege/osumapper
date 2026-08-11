@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from osumapper.difficulty import calculate_standard_stars, difficulty_for_stars
 from osumapper.errors import InputError
 from osumapper.training import DATASET_SCHEMA_VERSION
 from osumapper.training.beatmaps import (
@@ -31,6 +32,9 @@ RATINGS = {"good", "bad", "ignore"}
 @dataclass(frozen=True, slots=True)
 class ScanSummary:
     discovered: int
+    loose_osu: int
+    osz_packages: int
+    osz_maps: int
     indexed: int
     candidates: int
     good: int
@@ -41,6 +45,9 @@ class ScanSummary:
     def as_dict(self) -> dict[str, Any]:
         return {
             "discovered": self.discovered,
+            "loose_osu": self.loose_osu,
+            "osz_packages": self.osz_packages,
+            "osz_maps": self.osz_maps,
             "indexed": self.indexed,
             "candidates": self.candidates,
             "good": self.good,
@@ -48,6 +55,78 @@ class ScanSummary:
             "skipped": self.skipped,
             "dataset": str(self.dataset),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class _StagedPackages:
+    maps: tuple[Path, ...]
+    extracted: int
+    reused: int
+    skips: tuple[dict[str, Any], ...]
+
+
+def _stage_osz_packages(
+    packages: list[Path],
+    paths: DatasetPaths,
+    *,
+    progress: Progress,
+    tolerate_errors: bool,
+) -> _StagedPackages:
+    """Extract packages into a content-addressed cache without touching their source."""
+    imported_root = paths.root / "imported_osz"
+    imported_root.mkdir(parents=True, exist_ok=True)
+    extracted = 0
+    reused = 0
+    maps: list[Path] = []
+    skips: list[dict[str, Any]] = []
+    for index, package in enumerate(packages, start=1):
+        try:
+            package_hash = file_sha256(package)
+            destination = imported_root / package_hash[:20]
+            package_maps = (
+                sorted(destination.rglob("*.osu"), key=lambda path: str(path).casefold())
+                if destination.is_dir()
+                else []
+            )
+            if package_maps:
+                reused += 1
+            elif destination.exists():
+                raise InputError(f"Incomplete .osz cache directory contains no maps: {destination}")
+            else:
+                with tempfile.TemporaryDirectory(
+                    prefix=".osumapper-osz-", dir=imported_root
+                ) as name:
+                    temporary = Path(name)
+                    safe_extract_osz(package, temporary)
+                    temporary_maps = sorted(
+                        temporary.rglob("*.osu"), key=lambda path: str(path).casefold()
+                    )
+                    if not temporary_maps:
+                        raise InputError(f"Package contains no .osu difficulties: {package}")
+                    os.replace(temporary, destination)
+                package_maps = sorted(
+                    destination.rglob("*.osu"), key=lambda path: str(path).casefold()
+                )
+                extracted += 1
+            maps.extend(package_maps)
+        except (InputError, OSError) as exc:
+            if not tolerate_errors:
+                raise
+            skips.append(
+                {
+                    "path": str(package),
+                    "reason": "invalid_osz",
+                    "detail": str(exc),
+                }
+            )
+        if index % 25 == 0:
+            progress(f"Staged {index}/{len(packages)} .osz packages")
+    return _StagedPackages(
+        maps=tuple(maps),
+        extracted=extracted,
+        reused=reused,
+        skips=tuple(skips),
+    )
 
 
 def _ratings_document(paths: DatasetPaths) -> dict[str, Any]:
@@ -105,6 +184,8 @@ def _quality_state(rating: str | None, reasons: list[str]) -> tuple[str, bool]:
 def _row(
     parsed: ParsedTrainingBeatmap,
     map_json_path: Path,
+    star_rating: float,
+    difficulty_tier: str,
     rating: str | None,
     quality_status: str,
     eligible: bool,
@@ -134,6 +215,8 @@ def _row(
         "tags": metadata["tags"],
         "mode": metadata["mode"],
         "is_converted": parsed.is_converted,
+        "star_rating": star_rating,
+        "difficulty_tier": difficulty_tier,
         "hp": difficulty["hp"],
         "cs": difficulty["cs"],
         "od": difficulty["od"],
@@ -214,6 +297,7 @@ def scan_dataset(
     quality: QualityConfig | None = None,
     progress: Progress = print,
     append: bool = False,
+    include_osz: bool = True,
 ) -> ScanSummary:
     root = songs_root.expanduser().resolve()
     if not root.is_dir():
@@ -222,13 +306,48 @@ def scan_dataset(
     paths.create()
     config = quality or QualityConfig()
     ratings = _ratings_document(paths)
-    discovered = sorted(root.rglob("*.osu"), key=lambda path: str(path).casefold())
-    progress(f"Discovered {len(discovered)} .osu files")
+    imported_root = (paths.root / "imported_osz").resolve()
+    exclude_import_cache = root != imported_root and imported_root.is_relative_to(root)
+    loose_maps = sorted(
+        (
+            path
+            for path in root.rglob("*.osu")
+            if not exclude_import_cache or not path.resolve().is_relative_to(imported_root)
+        ),
+        key=lambda path: str(path).casefold(),
+    )
+    packages = (
+        sorted(
+            (
+                path
+                for path in root.rglob("*.osz")
+                if not exclude_import_cache or not path.resolve().is_relative_to(imported_root)
+            ),
+            key=lambda path: str(path).casefold(),
+        )
+        if include_osz
+        else []
+    )
+    staged = _stage_osz_packages(
+        packages,
+        paths,
+        progress=progress,
+        tolerate_errors=True,
+    )
+    discovered: list[tuple[Path, Path]] = [
+        *((map_path, root) for map_path in loose_maps),
+        *((map_path, imported_root) for map_path in staged.maps),
+    ]
+    discovered.sort(key=lambda item: str(item[0]).casefold())
+    progress(
+        f"Discovered {len(loose_maps)} loose .osu files and {len(packages)} .osz packages "
+        f"containing {len(staged.maps)} .osu files"
+    )
     rows: list[dict[str, Any]] = []
-    skips: list[dict[str, Any]] = []
+    skips: list[dict[str, Any]] = list(staged.skips)
     seen_hashes: dict[str, Path] = {}
 
-    for index, map_path in enumerate(discovered, start=1):
+    for index, (map_path, allowed_root) in enumerate(discovered, start=1):
         try:
             map_sha = file_sha256(map_path)
         except OSError as exc:
@@ -245,7 +364,9 @@ def scan_dataset(
             continue
         seen_hashes[map_sha] = map_path
         try:
-            parsed = parse_standard_beatmap(map_path, root)
+            parsed = parse_standard_beatmap(map_path, allowed_root)
+            star_rating = calculate_standard_stars(parsed.map_path)
+            difficulty_tier = difficulty_for_stars(star_rating).key
             reasons = _quality_reasons(parsed, config)
             rating = _rating_for(ratings, parsed.map_sha256, parsed.map_path)
             quality_status, eligible = _quality_state(rating, reasons)
@@ -254,9 +375,22 @@ def scan_dataset(
             detail["quality_status"] = quality_status
             detail["eligible"] = eligible
             detail["quality_reasons"] = reasons
+            detail["star_rating"] = star_rating
+            detail["difficulty_tier"] = difficulty_tier
             map_json_path = paths.maps / f"{parsed.map_id}-{parsed.map_sha256[:12]}.json"
             write_json(map_json_path, detail)
-            rows.append(_row(parsed, map_json_path, rating, quality_status, eligible, reasons))
+            rows.append(
+                _row(
+                    parsed,
+                    map_json_path,
+                    star_rating,
+                    difficulty_tier,
+                    rating,
+                    quality_status,
+                    eligible,
+                    reasons,
+                )
+            )
             if not eligible:
                 skips.append(
                     {
@@ -267,6 +401,8 @@ def scan_dataset(
                 )
         except BeatmapDataError as exc:
             skips.append({"path": str(map_path), "reason": exc.code, "detail": str(exc)})
+        except InputError as exc:
+            skips.append({"path": str(map_path), "reason": "star_rating_error", "detail": str(exc)})
         except (OSError, ValueError, OverflowError) as exc:
             skips.append({"path": str(map_path), "reason": "malformed_map", "detail": str(exc)})
         if index % 250 == 0:
@@ -289,6 +425,9 @@ def scan_dataset(
     counts = Counter(str(row["quality_status"]) for row in rows)
     summary = ScanSummary(
         discovered=len(discovered),
+        loose_osu=len(loose_maps),
+        osz_packages=len(packages),
+        osz_maps=len(staged.maps),
         indexed=len(rows),
         candidates=counts["candidate_unrated"],
         good=counts["good"],
@@ -305,6 +444,15 @@ def scan_dataset(
         {
             "schema_version": DATASET_SCHEMA_VERSION,
             "songs_root": str(root),
+            "include_osz": include_osz,
+            "source_formats": {
+                "loose_osu": len(loose_maps),
+                "osz_packages": len(packages),
+                "osz_maps": len(staged.maps),
+                "osz_extracted": staged.extracted,
+                "osz_reused": staged.reused,
+                "osz_skipped": len(staged.skips),
+            },
             "songs_roots": sorted(
                 {
                     str(root),
@@ -411,24 +559,13 @@ def import_osz_dataset(
     paths = DatasetPaths.at(dataset_root)
     paths.create()
     imported_root = paths.root / "imported_osz"
-    imported_root.mkdir(parents=True, exist_ok=True)
-    extracted = 0
-    reused = 0
-    maps: list[Path] = []
-    for index, package in enumerate(packages, start=1):
-        package_hash = file_sha256(package)
-        destination = imported_root / package_hash[:20]
-        if destination.is_dir() and any(destination.rglob("*.osu")):
-            reused += 1
-        else:
-            with tempfile.TemporaryDirectory(prefix=".osumapper-osz-", dir=imported_root) as name:
-                temporary = Path(name)
-                safe_extract_osz(package, temporary)
-                os.replace(temporary, destination)
-            extracted += 1
-        maps.extend(destination.rglob("*.osu"))
-        if index % 25 == 0:
-            progress(f"Imported {index}/{len(packages)} packages")
+    staged = _stage_osz_packages(
+        packages,
+        paths,
+        progress=progress,
+        tolerate_errors=False,
+    )
+    maps = list(staged.maps)
     if rating is not None:
         rate_maps(sorted(set(maps)), rating, dataset_root=paths.root)
     summary = scan_dataset(
@@ -437,11 +574,12 @@ def import_osz_dataset(
         quality=quality,
         progress=progress,
         append=True,
+        include_osz=False,
     )
     return {
         "packages": len(packages),
-        "extracted": extracted,
-        "reused": reused,
+        "extracted": staged.extracted,
+        "reused": staged.reused,
         "maps_in_packages": len(set(maps)),
         "rating": rating or "unrated",
         "dataset": summary.as_dict(),
@@ -487,6 +625,7 @@ def dataset_statistics(*, dataset_root: Path | None = None) -> dict[str, Any]:
     quality_counts = Counter(str(row["quality_status"]) for row in rows)
     rating_counts = Counter(str(row["rating"]) for row in rows)
     versions = Counter(str(row["version"]) for row in rows)
+    difficulty_tiers = Counter(str(row["difficulty_tier"]) for row in rows)
     return {
         "songs": len({row["song_id"] for row in rows}),
         "mapsets": len({row["mapset_key"] for row in rows}),
@@ -502,5 +641,7 @@ def dataset_statistics(*, dataset_root: Path | None = None) -> dict[str, Any]:
             [float(row["map_duration_ms"]) / 1000.0 for row in rows]
         ),
         "objects_per_second": _distribution([float(row["objects_per_second"]) for row in rows]),
+        "star_rating": _distribution([float(row["star_rating"]) for row in rows]),
+        "difficulty_tiers": dict(sorted(difficulty_tiers.items())),
         "difficulty_names": dict(versions.most_common(50)),
     }

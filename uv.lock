@@ -688,6 +688,7 @@ dependencies = [
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "pyarrow" },
+    { name = "rosu-pp-py" },
     { name = "scikit-learn" },
     { name = "tensorflow" },
     { name = "tf-keras" },
@@ -711,6 +712,7 @@ requires-dist = [
     { name = "matplotlib", specifier = ">=3.9,<4" },
     { name = "numpy", specifier = ">=1.26.4,<3" },
     { name = "pyarrow", specifier = ">=17,<30" },
+    { name = "rosu-pp-py", specifier = "==4.0.2" },
     { name = "scikit-learn", specifier = ">=1.5,<2" },
     { name = "tensorflow", specifier = ">=2.18,<2.21" },
     { name = "tensorflow", extras = ["and-cuda"], marker = "sys_platform == 'linux' and extra == 'gpu'", specifier = ">=2.18,<2.21" },
@@ -894,6 +896,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/c0/8f/0722ca900cc807c13a6a0c696dacf35430f72e0ec571c4275d2371fca3e9/rich-15.0.0.tar.gz", hash = "sha256:edd07a4824c6b40189fb7ac9bc4c52536e9780fbbfbddf6f1e2502c31b068c36", size = 230680, upload-time = "2026-04-12T08:24:00.75Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/82/3b/64d4899d73f91ba49a8c18a8ff3f0ea8f1c1d75481760df8c68ef5235bf5/rich-15.0.0-py3-none-any.whl", hash = "sha256:33bd4ef74232fb73fe9279a257718407f169c09b78a87ad3d296f548e27de0bb", size = 310654, upload-time = "2026-04-12T08:24:02.83Z" },
+]
+
+[[package]]
+name = "rosu-pp-py"
+version = "4.0.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/03/7f/4c694e79653f9d5a9007d27f491ceb46225889baf4b365c5f10cc06b0753/rosu_pp_py-4.0.2.tar.gz", hash = "sha256:6653c66ff031de3f4ee3a93e74257ecfd0b0a9c6389f940af0adb211efa7fde5", size = 40788, upload-time = "2026-04-22T22:17:29.897Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0c/28/c52abafb6c5d4fd44f47740527a2343a0e62e0ee5e3de440b388e585b15f/rosu_pp_py-4.0.2-cp312-cp312-macosx_10_12_x86_64.whl", hash = "sha256:4aef996abe802c77bc564d8fdc770fb07bfb0fc1ed21ffb2eddc75adb589fd49", size = 599083, upload-time = "2026-04-22T22:16:32.054Z" },
+    { url = "https://files.pythonhosted.org/packages/c9/3a/b52cb8bbd48f5f1d6b6072b3144baa81a2810dc2967b8550faf78aab9d01/rosu_pp_py-4.0.2-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:eb9356c5e639c3549c6aa91b653aa0fcf49570e43a63470125f962e97941bb1d", size = 561538, upload-time = "2026-04-22T22:16:41.063Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/2f/dabd3c9cb9aa5732915146e96cc20a0d5658749d26af2946a451667e3dc3/rosu_pp_py-4.0.2-cp312-cp312-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:76df4005fd232e13b96f873a8e078f7455b88bdcb8b78c42193cf68fc344ee4c", size = 582749, upload-time = "2026-04-22T22:17:04.29Z" },
+    { url = "https://files.pythonhosted.org/packages/b7/07/66d0dda4a19ae5c19ab52e56fe3ee2b385a834b7da242c506e3f731f80fe/rosu_pp_py-4.0.2-cp312-cp312-manylinux_2_17_armv7l.manylinux2014_armv7l.whl", hash = "sha256:a52137b90658fc6cd3b549d545e9c28fbb9d66634ae57586f91b8e8c19a7774b", size = 599341, upload-time = "2026-04-22T22:16:36.495Z" },
+    { url = "https://files.pythonhosted.org/packages/bf/80/67e4d10250bba8859f65fc7c69a46670eac223981db60b21bd323c80d965/rosu_pp_py-4.0.2-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:8b3b266f460ed44e983d43fd65d339875a982d76ac44a78b6da9a00ab0b03261", size = 612527, upload-time = "2026-04-22T22:16:50.278Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/23/38f4b775543aafc30c66f957b98a5207718485ceb069df0ba065f71d8b98/rosu_pp_py-4.0.2-cp312-cp312-musllinux_1_1_aarch64.whl", hash = "sha256:0cdbb7a27725a77e34bdd66f568a7d80825a0141abe4154b8210351a1be38aaf", size = 759718, upload-time = "2026-04-22T22:16:43.684Z" },
+    { url = "https://files.pythonhosted.org/packages/09/48/6c4c278ad62fa98d8c9887c08a2ff4edd220d284fc708b467757db81da53/rosu_pp_py-4.0.2-cp312-cp312-musllinux_1_1_armv7l.whl", hash = "sha256:f3400fd1ec44dc0f97f28c1e79a20af308db296097e20cf21e52b68fc9f9b839", size = 876294, upload-time = "2026-04-22T22:16:59.969Z" },
+    { url = "https://files.pythonhosted.org/packages/00/88/dba563f14dfcdd81b706766163d2569e451331dcd611e0512a5fe7374efb/rosu_pp_py-4.0.2-cp312-cp312-musllinux_1_1_x86_64.whl", hash = "sha256:d9f82e86b603cb026f310b1862164e5b073d1ac9468440be4d4ac31572ce5716", size = 825844, upload-time = "2026-04-22T22:16:23.076Z" },
+    { url = "https://files.pythonhosted.org/packages/e8/67/a480a83b1db73157a9d998cd432f4d7f1e68ae3eacae56785d887eae9dc0/rosu_pp_py-4.0.2-cp312-cp312-win_amd64.whl", hash = "sha256:d2134900068e3820411e6252f16df578986a55fbeee06a9b0efbb574b3cd54ce", size = 504120, upload-time = "2026-04-22T22:17:31.9Z" },
+    { url = "https://files.pythonhosted.org/packages/44/3e/118f81295557e3ab038ccdcb1f42c5f6400ec148cf589939928df460e387/rosu_pp_py-4.0.2-cp312-cp312-win_arm64.whl", hash = "sha256:400a399c8e132473f982dee7ca68b9d6bfac1a7f682966bea8a4e5869cac102c", size = 476610, upload-time = "2026-04-22T22:17:01.472Z" },
 ]
 
 [[package]]

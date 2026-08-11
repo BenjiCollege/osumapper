@@ -14,6 +14,13 @@ from typing import Any
 
 from osumapper.beatmap import BeatmapDocument
 from osumapper.config import GameMode, GenerationConfig, PresetSpec, configure_determinism
+from osumapper.difficulty import (
+    STAR_TARGET_TOLERANCE,
+    apply_standard_difficulty,
+    calculate_standard_stars,
+    label_standard_difficulty,
+    resolve_standard_difficulty,
+)
 from osumapper.errors import DependencyError, GenerationError, InputError
 from osumapper.paths import legacy_v7_root
 
@@ -334,6 +341,12 @@ def generate_document(
     progress: Progress = print,
 ) -> BeatmapDocument:
     configure_determinism(config.seed)
+    requested_difficulty = resolve_standard_difficulty(config.difficulty_tier, config.target_stars)
+    if requested_difficulty is not None:
+        profile, _target_stars = requested_difficulty
+        if document.mode is not GameMode.STANDARD or preset.mode is not GameMode.STANDARD:
+            raise InputError("Fixed star difficulty generation supports osu!standard only.")
+        document = apply_standard_difficulty(document, profile)
     if config.mode is not None and config.mode is not preset.mode:
         produced = preset.mode.name.lower()
         requested = config.mode.name.lower()
@@ -353,6 +366,8 @@ def generate_document(
             model_root=config.modern_model,
             threshold=config.rhythm_threshold,
             target_density=config.target_density,
+            difficulty_tier=config.difficulty_tier,
+            target_stars=config.target_stars,
             progress=progress,
         )
         progress(f"Modern rhythm selected {len(prediction.timestamps_ms)} timestamps")
@@ -383,4 +398,20 @@ def generate_document(
     preset_label = (
         f"{preset.name}-modern-rhythm" if config.rhythm_engine == "modern" else preset.name
     )
-    return document.with_hit_objects(objects, preset=preset_label, seed=config.seed)
+    generated = document.with_hit_objects(objects, preset=preset_label, seed=config.seed)
+    if requested_difficulty is not None:
+        profile, target_stars = requested_difficulty
+        actual_stars = calculate_standard_stars(generated)
+        if (
+            not profile.contains(actual_stars)
+            or abs(actual_stars - target_stars) > STAR_TARGET_TOLERANCE
+        ):
+            raise GenerationError(
+                f"Generated {actual_stars:.2f}★ for a requested {target_stars:.2f}★ "
+                f"{profile.label} target ({profile.range_label}, allowed target error "
+                f"±{STAR_TARGET_TOLERANCE:.2f}★). "
+                "Adjust --target-density or retrain Conformer-v4 with more maps in this band."
+            )
+        progress(f"Verified {profile.label}: {actual_stars:.2f}★ for requested {target_stars:.2f}★")
+        generated = label_standard_difficulty(generated, profile, actual_stars)
+    return generated

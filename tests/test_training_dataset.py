@@ -29,6 +29,75 @@ def _difficulty_text(*, version: str, beatmap_id: int, beatmapset_id: int = 100)
 
 
 class TrainingDatasetTests(unittest.TestCase):
+    def test_scan_combines_loose_maps_and_osz_packages_without_modifying_source(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            songs = root / "Songs"
+            stable_set = songs / "100 Legacy"
+            stable_set.mkdir(parents=True)
+            (stable_set / "audio.wav").write_bytes(b"RIFF-stable")
+            (stable_set / "stable.osu").write_text(
+                _difficulty_text(version="Stable", beatmap_id=1, beatmapset_id=100),
+                encoding="utf-8",
+            )
+            package = songs / "downloaded.osz"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("audio.wav", b"RIFF-package")
+                archive.writestr(
+                    "package.osu",
+                    _difficulty_text(version="Package", beatmap_id=2, beatmapset_id=200),
+                )
+            package_before = package.read_bytes()
+            data_root = root / "training_data"
+
+            summary = scan_dataset(
+                songs,
+                dataset_root=data_root,
+                quality=QualityConfig(min_objects=1, min_duration_ms=0),
+                progress=lambda _message: None,
+            )
+            rows = read_parquet(DatasetPaths.at(data_root).dataset)
+
+            self.assertEqual(summary.loose_osu, 1)
+            self.assertEqual(summary.osz_packages, 1)
+            self.assertEqual(summary.osz_maps, 1)
+            self.assertEqual(summary.discovered, 2)
+            self.assertEqual(summary.indexed, 2)
+            self.assertEqual({row["beatmapset_id"] for row in rows}, {100, 200})
+            self.assertEqual(package.read_bytes(), package_before)
+            self.assertTrue((data_root / "imported_osz").is_dir())
+
+    def test_mixed_scan_logs_invalid_osz_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            songs = root / "Songs"
+            mapset = songs / "100 Legacy"
+            mapset.mkdir(parents=True)
+            (mapset / "audio.wav").write_bytes(b"RIFF-stable")
+            (mapset / "stable.osu").write_text(
+                _difficulty_text(version="Stable", beatmap_id=1, beatmapset_id=100),
+                encoding="utf-8",
+            )
+            (songs / "broken.osz").write_bytes(b"not-a-zip")
+            data_root = root / "training_data"
+
+            summary = scan_dataset(
+                songs,
+                dataset_root=data_root,
+                quality=QualityConfig(min_objects=1, min_duration_ms=0),
+                progress=lambda _message: None,
+            )
+            skips = [
+                json.loads(line)
+                for line in DatasetPaths.at(data_root)
+                .skipped.read_text(encoding="utf-8")
+                .splitlines()
+            ]
+
+            self.assertEqual(summary.indexed, 1)
+            self.assertEqual(summary.osz_packages, 1)
+            self.assertIn("invalid_osz", {record["reason"] for record in skips})
+
     def test_osz_import_safely_appends_and_can_mark_reviewed_maps_good(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

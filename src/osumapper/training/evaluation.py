@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from osumapper.difficulty import LEGACY_DIFFICULTY_FEATURES
 from osumapper.errors import DependencyError, InputError
 from osumapper.training.config import DatasetPaths, GridConfig, prediction_threshold
 from osumapper.training.loader import prepare_map, window_probabilities
@@ -87,21 +88,30 @@ def evaluate_rhythm(
         prediction_threshold=prediction_threshold(config, threshold),
     )
     model = load_rhythm_model(model_path, compile_model=False)
+    difficulty_features = tuple(config.get("difficulty_features", LEGACY_DIFFICULTY_FEATURES))
     all_labels: list[int] = []
     all_probabilities: list[float] = []
+    all_predictions: list[bool] = []
     timing_errors: list[float] = []
     density_errors: list[float] = []
     map_reports: list[dict[str, Any]] = []
     for row in test_rows:
+        map_threshold = prediction_threshold(
+            config,
+            threshold,
+            target_density=float(row["objects_per_second"]),
+            difficulty_tier=str(row.get("difficulty_tier", "")),
+        )
         prepared = prepare_map(
             row,
             dataset_root=paths.root,
             grid_config=grid_config,
             audio_context_radius=int(config.get("audio_context_radius", 0)),
+            difficulty_features=difficulty_features,
         )
         probabilities = window_probabilities(model, prepared, grid_config.sequence_length)
         labels = prepared.labels[:, 0].astype(int)
-        predictions = probabilities >= grid_config.prediction_threshold
+        predictions = probabilities >= map_threshold
         candidate_times = [candidate.timestamp_ms for candidate in prepared.grid.candidates]
         predicted_times = [candidate_times[index] for index in np.flatnonzero(predictions).tolist()]
         human_times = [
@@ -115,11 +125,15 @@ def evaluate_rhythm(
         density_errors.append(density_error)
         all_labels.extend(labels.tolist())
         all_probabilities.extend(probabilities.tolist())
+        all_predictions.extend(predictions.tolist())
         map_reports.append(
             {
                 "map_id": row["map_id"],
                 "song_id": row["song_id"],
                 "map_path": row["map_path"],
+                "star_rating": row.get("star_rating"),
+                "difficulty_tier": row.get("difficulty_tier"),
+                "threshold": map_threshold,
                 "human_objects": len(human_times),
                 "predicted_objects": len(predicted_times),
                 "matched_events": matched,
@@ -132,11 +146,12 @@ def evaluate_rhythm(
     precision_score, recall_score, f1_score, average_precision_score = _require_metrics()
     labels_array = np.asarray(all_labels, dtype=int)
     probability_array = np.asarray(all_probabilities, dtype=float)
-    prediction_array = probability_array >= grid_config.prediction_threshold
+    prediction_array = np.asarray(all_predictions, dtype=bool)
     report = {
         "split": "test",
         "model": str(model_path),
         "threshold": grid_config.prediction_threshold,
+        "difficulty_thresholds": config.get("calibration", {}).get("difficulty_tiers", []),
         "dataset_sha256": current_manifest["dataset_sha256"],
         "test_songs": sorted(test_songs),
         "test_maps": len(test_rows),

@@ -11,6 +11,11 @@ from typing import Any
 
 import numpy as np
 
+from osumapper.difficulty import (
+    LEGACY_DIFFICULTY_FEATURES,
+    STANDARD_DIFFICULTY_KEYS,
+    STAR_DIFFICULTY_FEATURES,
+)
 from osumapper.errors import DependencyError, InputError
 from osumapper.training.config import DatasetPaths, GridConfig
 from osumapper.training.features import feature_path
@@ -52,10 +57,41 @@ class LoaderSummary:
     negatives: int
     audio_dimension: int
     grid_dimension: int
+    difficulty_dimension: int
     positive_weight: float
     songs: int = 0
     cache_path: str | None = None
     song_balanced: bool = False
+
+
+def difficulty_feature_array(
+    row: dict[str, Any],
+    feature_names: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
+) -> np.ndarray[Any, Any]:
+    if feature_names == STAR_DIFFICULTY_FEATURES:
+        tier = str(row["difficulty_tier"])
+        try:
+            tier_index = STANDARD_DIFFICULTY_KEYS.index(tier)
+        except ValueError as exc:
+            raise InputError(f"Unknown standard difficulty tier in dataset: {tier}") from exc
+        return np.asarray(
+            [
+                float(row["star_rating"]) / 10.0,
+                tier_index / max(1, len(STANDARD_DIFFICULTY_KEYS) - 1),
+            ],
+            dtype=np.float32,
+        )
+    if feature_names == LEGACY_DIFFICULTY_FEATURES:
+        return np.asarray(
+            [
+                float(row["od"]) / 10.0,
+                float(row["ar"]) / 10.0,
+                float(row["cs"]) / 10.0,
+                float(row["objects_per_second"]) / 10.0,
+            ],
+            dtype=np.float32,
+        )
+    raise InputError(f"Unsupported rhythm difficulty features: {', '.join(feature_names)}")
 
 
 def prepare_map(
@@ -64,6 +100,7 @@ def prepare_map(
     dataset_root: Path | None = None,
     grid_config: GridConfig | None = None,
     audio_context_radius: int = 0,
+    difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
 ) -> PreparedMap:
     paths = DatasetPaths.at(dataset_root)
     detail = load_map_detail(Path(str(row["map_json_path"])))
@@ -77,15 +114,7 @@ def prepare_map(
     labels = np.asarray([candidate.label for candidate in grid.candidates], dtype=np.float32)[
         :, None
     ]
-    difficulty = np.asarray(
-        [
-            float(row["od"]) / 10.0,
-            float(row["ar"]) / 10.0,
-            float(row["cs"]) / 10.0,
-            float(row["objects_per_second"]) / 10.0,
-        ],
-        dtype=np.float32,
-    )
+    difficulty = difficulty_feature_array(row, difficulty_features)
     return PreparedMap(row, grid, audio, grid_features, difficulty, labels)
 
 
@@ -95,6 +124,7 @@ def iter_windows(
     dataset_root: Path | None = None,
     grid_config: GridConfig | None = None,
     audio_context_radius: int = 0,
+    difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
 ) -> Iterator[WindowExample]:
     config = grid_config or GridConfig()
     length = config.sequence_length
@@ -105,6 +135,7 @@ def iter_windows(
                 dataset_root=dataset_root,
                 grid_config=config,
                 audio_context_radius=audio_context_radius,
+                difficulty_features=difficulty_features,
             )
         except InputError as exc:
             raise InputError(f"Could not prepare {row['map_path']}: {exc}") from exc
@@ -138,23 +169,27 @@ def summarize_loader(
     dataset_root: Path | None = None,
     grid_config: GridConfig | None = None,
     audio_context_radius: int = 0,
+    difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
 ) -> LoaderSummary:
     windows = 0
     positives = 0
     valid_positions = 0
     audio_dimension = 0
     grid_dimension = 0
+    difficulty_dimension = 0
     for example in iter_windows(
         rows,
         dataset_root=dataset_root,
         grid_config=grid_config,
         audio_context_radius=audio_context_radius,
+        difficulty_features=difficulty_features,
     ):
         windows += 1
         valid_positions += int(example.mask.sum())
         positives += int((example.labels[:, 0] * example.mask).sum())
         audio_dimension = example.inputs["audio_features"].shape[1]
         grid_dimension = example.inputs["grid_features"].shape[1]
+        difficulty_dimension = example.inputs["difficulty"].shape[0]
     if windows == 0:
         raise InputError("The selected split produced no training windows.")
     negatives = valid_positions - positives
@@ -168,6 +203,7 @@ def summarize_loader(
         negatives=negatives,
         audio_dimension=audio_dimension,
         grid_dimension=grid_dimension,
+        difficulty_dimension=difficulty_dimension,
         positive_weight=positive_weight,
         songs=len({str(row["song_id"]) for row in rows}),
     )
@@ -179,6 +215,7 @@ def _window_cache_key(
     paths: DatasetPaths,
     grid_config: GridConfig,
     audio_context_radius: int,
+    difficulty_features: tuple[str, ...],
 ) -> str:
     feature_manifest = read_json(paths.features / "manifest.json", default={})
     identity = {
@@ -193,6 +230,7 @@ def _window_cache_key(
         ],
         "grid": grid_config.as_dict(),
         "audio_context_radius": audio_context_radius,
+        "difficulty_features": list(difficulty_features),
         "audio_features": feature_manifest.get("config", {}),
     }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
@@ -240,6 +278,7 @@ def _build_window_cache(
     cache_root: Path,
     grid_config: GridConfig,
     audio_context_radius: int,
+    difficulty_features: tuple[str, ...],
     progress: Any | None = print,
 ) -> dict[str, Any]:
     song_ids = sorted({str(row["song_id"]) for row in rows})
@@ -252,6 +291,7 @@ def _build_window_cache(
     valid_positions = 0
     audio_dimension = 0
     grid_dimension = 0
+    difficulty_dimension = 0
     shard_capacity: int | None = None
 
     def flush() -> None:
@@ -269,6 +309,7 @@ def _build_window_cache(
             dataset_root=paths.root,
             grid_config=grid_config,
             audio_context_radius=audio_context_radius,
+            difficulty_features=difficulty_features,
         ),
         start=1,
     ):
@@ -286,6 +327,7 @@ def _build_window_cache(
         valid_positions += int(example.mask.sum())
         audio_dimension = int(example.inputs["audio_features"].shape[1])
         grid_dimension = int(example.inputs["grid_features"].shape[1])
+        difficulty_dimension = int(example.inputs["difficulty"].shape[0])
         buffer.append(example)
         buffer_song_indices.append(song_index)
         if len(buffer) >= shard_capacity:
@@ -307,6 +349,7 @@ def _build_window_cache(
         "negatives": negatives,
         "audio_dimension": audio_dimension,
         "grid_dimension": grid_dimension,
+        "difficulty_dimension": difficulty_dimension,
         "positive_weight": min(50.0, max(1.0, negatives / positives)),
         "sequence_length": grid_config.sequence_length,
         "audio_context_radius": audio_context_radius,
@@ -328,6 +371,7 @@ def _summary_from_manifest(
         negatives=int(manifest["negatives"]),
         audio_dimension=int(manifest["audio_dimension"]),
         grid_dimension=int(manifest["grid_dimension"]),
+        difficulty_dimension=int(manifest.get("difficulty_dimension", 4)),
         positive_weight=float(manifest["positive_weight"]),
         songs=int(manifest["songs"]),
         cache_path=str(cache_root),
@@ -369,7 +413,9 @@ def _cached_tf_dataset(
             "grid_features": tf.TensorSpec(
                 (None, length, int(manifest["grid_dimension"])), tf.float16
             ),
-            "difficulty": tf.TensorSpec((None, 4), tf.float16),
+            "difficulty": tf.TensorSpec(
+                (None, int(manifest.get("difficulty_dimension", 4))), tf.float16
+            ),
         },
         tf.TensorSpec((None, length, 1), tf.float32),
         tf.TensorSpec((None, length), tf.float32),
@@ -406,6 +452,7 @@ def make_tf_dataset(
     cache_mode: str = "auto",
     balance_songs: bool = False,
     progress: Any | None = print,
+    difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
 ) -> tuple[Any, LoaderSummary]:
     try:
         import tensorflow as tf
@@ -425,6 +472,7 @@ def make_tf_dataset(
             paths=paths,
             grid_config=config,
             audio_context_radius=audio_context_radius,
+            difficulty_features=difficulty_features,
         )
         cache_root = paths.windows / str(cache_split) / cache_key
         manifest_path = cache_root / "manifest.json"
@@ -438,6 +486,7 @@ def make_tf_dataset(
                 cache_root=cache_root,
                 grid_config=config,
                 audio_context_radius=audio_context_radius,
+                difficulty_features=difficulty_features,
                 progress=progress,
             )
         summary = _summary_from_manifest(manifest, cache_root, song_balanced=balance_songs)
@@ -454,6 +503,7 @@ def make_tf_dataset(
             dataset_root=dataset_root,
             grid_config=config,
             audio_context_radius=audio_context_radius,
+            difficulty_features=difficulty_features,
         )
 
         def generator() -> Iterator[tuple[dict[str, Any], Any, Any]]:
@@ -462,6 +512,7 @@ def make_tf_dataset(
                 dataset_root=dataset_root,
                 grid_config=config,
                 audio_context_radius=audio_context_radius,
+                difficulty_features=difficulty_features,
             ):
                 yield example.inputs, example.labels, example.mask
 
@@ -473,7 +524,7 @@ def make_tf_dataset(
                 "grid_features": tf.TensorSpec(
                     (config.sequence_length, summary.grid_dimension), tf.float32
                 ),
-                "difficulty": tf.TensorSpec((4,), tf.float32),
+                "difficulty": tf.TensorSpec((summary.difficulty_dimension,), tf.float32),
             },
             tf.TensorSpec((config.sequence_length, 1), tf.float32),
             tf.TensorSpec((config.sequence_length,), tf.float32),

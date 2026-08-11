@@ -63,12 +63,19 @@ class TrainingPreprocessingTests(unittest.TestCase):
                     {"minimum_density": 0.0, "maximum_density": 1.5, "threshold": 0.7},
                     {"minimum_density": 1.5, "maximum_density": 3.0, "threshold": 0.9},
                 ],
+                "difficulty_tiers": [
+                    {"name": "hard", "threshold": 0.85},
+                ],
             },
         }
 
         self.assertEqual(prediction_threshold(config, target_density=2.0), 0.9)
         self.assertEqual(prediction_threshold(config, target_density=4.0), 0.8)
         self.assertEqual(prediction_threshold(config, 0.6, target_density=2.0), 0.6)
+        self.assertEqual(
+            prediction_threshold(config, target_density=2.0, difficulty_tier="hard"),
+            0.85,
+        )
 
     def test_song_level_split_is_deterministic_and_has_no_mapset_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as name:

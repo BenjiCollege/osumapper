@@ -115,6 +115,31 @@ class TrainingModelTests(unittest.TestCase):
             self.assertEqual(prediction.shape, (1, 16, 1))
             np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
 
+    def test_conformer_v4_uses_only_star_and_standard_difficulty_inputs(self) -> None:
+        model = build_rhythm_model(
+            audio_dimension=20,
+            grid_dimension=6,
+            difficulty_dimension=2,
+            sequence_length=16,
+            architecture="conformer-v4",
+            model_dimension=40,
+            transformer_blocks=1,
+            attention_heads=5,
+            jit_compile=False,
+        )
+        inputs = {
+            "audio_features": np.zeros((1, 16, 20), dtype=np.float32),
+            "grid_features": np.zeros((1, 16, 6), dtype=np.float32),
+            "difficulty": np.asarray([[0.335, 0.4]], dtype=np.float32),
+        }
+        inputs["grid_features"][0, :4, 0] = 0.4
+
+        prediction = model.predict(inputs, verbose=0)
+
+        self.assertEqual(model.name, "osumapper_rhythm_conformer_v4")
+        self.assertEqual(model.input["difficulty"].shape[-1], 2)
+        self.assertEqual(prediction.shape, (1, 16, 1))
+
     def test_placement_analyzer_reports_safe_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -258,6 +283,8 @@ class TrainingModelTests(unittest.TestCase):
                     modern_model=model_root,
                     rhythm_threshold=1e-6,
                     target_density=2.0,
+                    difficulty_tier="easy",
+                    target_stars=1.0,
                 ),
                 progress=lambda _message: None,
             )

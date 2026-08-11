@@ -91,7 +91,7 @@ class RhythmTrainingConfig:
     sequence_length: int = 256
     prediction_threshold: float = 0.5
     include_unrated: bool = False
-    architecture: str = "transformer-v1"
+    architecture: str = "conformer-v4"
     audio_context_radius: int = 0
     precision: str = "auto"
     xla: str = "auto"
@@ -112,10 +112,22 @@ def prediction_threshold(
     override: float | None = None,
     *,
     target_density: float | None = None,
+    difficulty_tier: str | None = None,
 ) -> float:
     """Resolve an explicit, validation-calibrated, or training-default threshold."""
     calibration = model_config.get("calibration", {})
     value: Any = override
+    if value is None and difficulty_tier is not None:
+        matching_tier = next(
+            (
+                band
+                for band in calibration.get("difficulty_tiers", [])
+                if str(band.get("name")) == difficulty_tier
+            ),
+            None,
+        )
+        if matching_tier is not None:
+            value = matching_tier["threshold"]
     if value is None and target_density is not None:
         matching = next(
             (

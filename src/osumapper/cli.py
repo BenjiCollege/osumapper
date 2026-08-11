@@ -15,6 +15,11 @@ from osumapper import (
     __version__,
 )
 from osumapper.config import GameMode
+from osumapper.difficulty import (
+    LEGACY_DIFFICULTY_FEATURES,
+    STANDARD_DIFFICULTY_KEYS,
+    STAR_DIFFICULTY_FEATURES,
+)
 from osumapper.errors import OsumapperError
 from osumapper.lazer import find_lazer_executable
 from osumapper.models import (
@@ -111,6 +116,16 @@ def _build_parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--target-density", type=float, help="target objects per second for modern rhythm"
     )
+    generate.add_argument(
+        "--difficulty-tier",
+        choices=STANDARD_DIFFICULTY_KEYS,
+        help="fixed osu!standard output tier",
+    )
+    generate.add_argument(
+        "--target-stars",
+        type=float,
+        help="target no-mod star rating inside the selected standard tier",
+    )
     generate.add_argument("--bpm", type=float, help="tempo for audio-only input")
     generate.add_argument("--offset", type=int, help="timing offset in milliseconds")
     generate.add_argument(
@@ -127,7 +142,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset = subparsers.add_parser("dataset", help="build and manage local training data")
     dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
     dataset_scan = dataset_sub.add_parser(
-        "scan", help="scan an osu!stable Songs directory for standard maps"
+        "scan", help="scan a mixed folder of loose .osu maps and .osz packages"
     )
     dataset_scan.add_argument("songs_root", type=Path)
     dataset_scan.add_argument("--data-root", type=Path)
@@ -138,6 +153,11 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_scan.add_argument("--max-bpm", type=float, default=1_000.0)
     dataset_scan.add_argument("--allow-converted", action="store_true")
     dataset_scan.add_argument("--append", action="store_true")
+    dataset_scan.add_argument(
+        "--no-osz",
+        action="store_true",
+        help="ignore .osz packages and scan only loose legacy .osu files",
+    )
 
     dataset_stats = dataset_sub.add_parser("stats", help="summarize the local dataset")
     dataset_stats.add_argument("--data-root", type=Path)
@@ -191,6 +211,11 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_windows.add_argument("--data-root", type=Path)
     dataset_windows.add_argument("--sequence-length", type=int, default=512)
     dataset_windows.add_argument("--audio-context-radius", type=int, default=0)
+    dataset_windows.add_argument(
+        "--architecture",
+        choices=("transformer-v1", "conformer-v2", "conformer-v3", "conformer-v4"),
+        default="conformer-v4",
+    )
     dataset_windows.add_argument("--rebuild", action="store_true")
 
     train = subparsers.add_parser("train", help="train or evaluate modern local models")
@@ -238,13 +263,13 @@ def _build_parser() -> argparse.ArgumentParser:
     train_rhythm_parser.add_argument("--threshold", type=float, default=0.5)
     train_rhythm_parser.add_argument(
         "--architecture",
-        choices=("transformer-v1", "conformer-v2", "conformer-v3"),
-        default="conformer-v3",
+        choices=("transformer-v1", "conformer-v2", "conformer-v3", "conformer-v4"),
+        default="conformer-v4",
     )
     train_rhythm_parser.add_argument(
         "--audio-context-radius",
         type=int,
-        help="feature frames on each side (default: 4 for v2, 0 for v1/v3)",
+        help="feature frames on each side (default: 4 for v2, 0 for v1/v3/v4)",
     )
 
     train_placement_parser = train_sub.add_parser(
@@ -358,6 +383,8 @@ def _generate(args: argparse.Namespace) -> int:
             placement_model=args.placement_model,
             rhythm_threshold=args.rhythm_threshold,
             target_density=args.target_density,
+            difficulty_tier=args.difficulty_tier,
+            target_stars=args.target_stars,
             audio=args.audio,
             bpm=args.bpm,
             offset_ms=args.offset,
@@ -457,6 +484,7 @@ def _dataset(args: argparse.Namespace) -> int:
             dataset_root=args.data_root,
             quality=quality,
             append=args.append,
+            include_osz=not args.no_osz,
         )
         print(json.dumps(result.as_dict(), indent=2))
         return 0
@@ -513,6 +541,11 @@ def _dataset(args: argparse.Namespace) -> int:
         if args.sequence_length <= 0 or not 0 <= args.audio_context_radius <= 32:
             raise OsumapperError("Sequence length must be positive and context must be 0-32.")
         summaries: dict[str, Any] = {}
+        difficulty_features = (
+            STAR_DIFFICULTY_FEATURES
+            if args.architecture == "conformer-v4"
+            else LEGACY_DIFFICULTY_FEATURES
+        )
         for split in ("train", "validation", "test"):
             rows = load_split(split, dataset_root=args.data_root)
             if not rows:
@@ -528,6 +561,7 @@ def _dataset(args: argparse.Namespace) -> int:
                 cache_split=split,
                 cache_mode="rebuild" if args.rebuild else "auto",
                 balance_songs=split == "train",
+                difficulty_features=difficulty_features,
             )
             summaries[split] = {
                 "windows": summary.windows,

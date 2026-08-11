@@ -9,6 +9,11 @@ from typing import Any
 import numpy as np
 
 from osumapper.beatmap import BeatmapDocument
+from osumapper.difficulty import (
+    LEGACY_DIFFICULTY_FEATURES,
+    STAR_DIFFICULTY_FEATURES,
+    resolve_standard_difficulty,
+)
 from osumapper.errors import InputError
 from osumapper.training.beatmaps import parse_timing_points
 from osumapper.training.config import AudioFeatureConfig, GridConfig, prediction_threshold
@@ -18,7 +23,7 @@ from osumapper.training.grid import (
     create_timing_grid,
     grid_feature_array,
 )
-from osumapper.training.loader import PreparedMap, window_probabilities
+from osumapper.training.loader import PreparedMap, difficulty_feature_array, window_probabilities
 from osumapper.training.model import load_rhythm_model
 from osumapper.training.storage import read_json
 from osumapper.training.trainer import default_model_root
@@ -33,9 +38,18 @@ class ModernRhythmPrediction:
     candidate_indices: np.ndarray[Any, Any]
     target_density: float
     threshold: float
+    target_stars: float | None = None
+    difficulty_tier: str | None = None
 
 
-def _difficulty(document: BeatmapDocument, target_density: float) -> np.ndarray[Any, Any]:
+def _difficulty(
+    document: BeatmapDocument,
+    target_density: float,
+    feature_names: tuple[str, ...],
+    *,
+    target_stars: float | None,
+    difficulty_tier: str | None,
+) -> np.ndarray[Any, Any]:
     values = document.values("Difficulty")
 
     def number(key: str, default: float) -> float:
@@ -47,7 +61,21 @@ def _difficulty(document: BeatmapDocument, target_density: float) -> np.ndarray[
     od = number("OverallDifficulty", 5.0)
     ar = number("ApproachRate", od)
     cs = number("CircleSize", 4.0)
-    return np.asarray([od / 10.0, ar / 10.0, cs / 10.0, target_density / 10.0], dtype=np.float32)
+    row = {
+        "od": od,
+        "ar": ar,
+        "cs": cs,
+        "objects_per_second": target_density,
+        "star_rating": target_stars,
+        "difficulty_tier": difficulty_tier,
+    }
+    if feature_names == STAR_DIFFICULTY_FEATURES and (
+        target_stars is None or difficulty_tier is None
+    ):
+        raise InputError(
+            "Conformer-v4 requires --difficulty-tier or --target-stars for generation."
+        )
+    return difficulty_feature_array(row, feature_names)
 
 
 def _source_density(document: BeatmapDocument, duration_seconds: float) -> float:
@@ -94,6 +122,8 @@ def predict_modern_rhythm(
     model_root: Path | None = None,
     threshold: float | None = None,
     target_density: float | None = None,
+    difficulty_tier: str | None = None,
+    target_stars: float | None = None,
     progress: Progress = print,
 ) -> ModernRhythmPrediction:
     requested = (model_root or default_model_root()).expanduser().resolve()
@@ -104,6 +134,19 @@ def predict_modern_rhythm(
         raise InputError(
             f"Modern rhythm model is missing under {root}. Run `osumapper train rhythm`."
         )
+    feature_names = tuple(config.get("difficulty_features", LEGACY_DIFFICULTY_FEATURES))
+    requested_difficulty = resolve_standard_difficulty(difficulty_tier, target_stars)
+    if requested_difficulty is not None and feature_names != STAR_DIFFICULTY_FEATURES:
+        raise InputError(
+            "Fixed star difficulty generation requires a Conformer-v4 star-conditioned model."
+        )
+    if feature_names == STAR_DIFFICULTY_FEATURES and requested_difficulty is None:
+        raise InputError(
+            "Conformer-v4 requires --difficulty-tier or --target-stars for generation."
+        )
+    profile, selected_stars = (
+        requested_difficulty if requested_difficulty is not None else (None, None)
+    )
     raw_audio_config = config.get("audio_features") or {}
     audio_config = (
         AudioFeatureConfig(**raw_audio_config) if raw_audio_config else AudioFeatureConfig()
@@ -114,6 +157,8 @@ def predict_modern_rhythm(
     density = float(
         target_density
         if target_density is not None
+        else profile.target_density
+        if profile is not None
         else _source_density(document, feature_result.duration_seconds)
     )
     if not 0 < density <= 20:
@@ -122,6 +167,7 @@ def predict_modern_rhythm(
         config,
         threshold,
         target_density=density,
+        difficulty_tier=profile.key if profile is not None else None,
     )
     grid_config = GridConfig(
         sequence_length=int(config["training"]["sequence_length"]),
@@ -148,7 +194,13 @@ def predict_modern_rhythm(
         grid=grid,
         audio=aligned_audio,
         grid_features=grid_feature_array(grid),
-        difficulty=_difficulty(document, density),
+        difficulty=_difficulty(
+            document,
+            density,
+            feature_names,
+            target_stars=selected_stars,
+            difficulty_tier=profile.key if profile is not None else None,
+        ),
         labels=np.zeros((len(grid.candidates), 1), dtype=np.float32),
     )
     progress(f"Running modern rhythm model across {len(grid.candidates)} grid positions")
@@ -175,4 +227,6 @@ def predict_modern_rhythm(
         candidate_indices=selected,
         target_density=density,
         threshold=selected_threshold,
+        target_stars=selected_stars,
+        difficulty_tier=profile.key if profile is not None else None,
     )

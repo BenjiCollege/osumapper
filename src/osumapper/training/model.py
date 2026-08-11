@@ -29,8 +29,14 @@ def build_rhythm_model(
     positive_weight: float = 1.0,
     jit_compile: bool | str = "auto",
     weight_decay: float = 0.0,
+    difficulty_dimension: int = 4,
 ) -> Any:
-    if audio_dimension <= 0 or grid_dimension <= 0 or sequence_length <= 0:
+    if (
+        audio_dimension <= 0
+        or grid_dimension <= 0
+        or sequence_length <= 0
+        or difficulty_dimension <= 0
+    ):
         raise InputError("Model dimensions must be positive.")
     keras = _require_keras()
     aliases = {
@@ -38,20 +44,25 @@ def build_rhythm_model(
         "transformer-v1": "transformer-v1",
         "conformer-v2": "conformer-v2",
         "conformer-v3": "conformer-v3",
+        "conformer-v4": "conformer-v4",
     }
     try:
         selected_architecture = aliases[architecture.casefold()]
     except KeyError as exc:
         raise InputError(
-            "Architecture must be transformer-v1, conformer-v2, or conformer-v3."
+            "Architecture must be transformer-v1, conformer-v2, conformer-v3, or conformer-v4."
         ) from exc
     conformer = selected_architecture.startswith("conformer-")
     dimension = model_dimension or (
-        160 if selected_architecture == "conformer-v3" else 192 if conformer else 128
+        160
+        if selected_architecture in {"conformer-v3", "conformer-v4"}
+        else 192
+        if conformer
+        else 128
     )
     blocks = transformer_blocks or (4 if conformer else 3)
     heads = attention_heads or (
-        5 if selected_architecture == "conformer-v3" else 6 if conformer else 4
+        5 if selected_architecture in {"conformer-v3", "conformer-v4"} else 6 if conformer else 4
     )
     if dimension % heads:
         raise InputError("Model dimension must be divisible by attention heads.")
@@ -61,7 +72,7 @@ def build_rhythm_model(
     grid_input = keras.Input(
         (sequence_length, grid_dimension), name="grid_features", dtype="float32"
     )
-    difficulty_input = keras.Input((4,), name="difficulty", dtype="float32")
+    difficulty_input = keras.Input((difficulty_dimension,), name="difficulty", dtype="float32")
 
     audio = keras.layers.Conv1D(
         dimension, kernel_size=5, padding="same", activation="gelu", name="audio_encoder"
@@ -75,7 +86,7 @@ def build_rhythm_model(
     combined = keras.layers.Concatenate(name="feature_fusion")([audio, grid, difficulty])
     sequence = keras.layers.Dense(dimension, name="fusion_projection")(combined)
     attention_mask = None
-    if selected_architecture == "conformer-v3":
+    if selected_architecture in {"conformer-v3", "conformer-v4"}:
         # The musical grid is non-zero for every real candidate and zero for
         # padded positions, so this prevents padding from affecting attention.
         valid_steps = keras.ops.any(keras.ops.not_equal(grid_input, 0.0), axis=-1)
@@ -143,7 +154,7 @@ def build_rhythm_model(
             convolution = keras.layers.LayerNormalization(
                 name=f"conformer_convolution_norm_{block}"
             )(sequence)
-            if selected_architecture == "conformer-v3":
+            if selected_architecture in {"conformer-v3", "conformer-v4"}:
                 convolution_value = keras.layers.Dense(
                     dimension,
                     name=f"conformer_convolution_value_{block}",
@@ -172,7 +183,7 @@ def build_rhythm_model(
             )(convolution)
             normalization = (
                 keras.layers.LayerNormalization
-                if selected_architecture == "conformer-v3"
+                if selected_architecture in {"conformer-v3", "conformer-v4"}
                 else keras.layers.BatchNormalization
             )
             convolution = normalization(name=f"conformer_convolution_batch_norm_{block}")(
@@ -232,7 +243,9 @@ def build_rhythm_model(
         learning_rate=learning_rate,
         positive_weight=positive_weight,
         jit_compile=jit_compile,
-        optimizer_name="adamw" if selected_architecture == "conformer-v3" else "adam",
+        optimizer_name=(
+            "adamw" if selected_architecture in {"conformer-v3", "conformer-v4"} else "adam"
+        ),
         weight_decay=weight_decay,
     )
     return model

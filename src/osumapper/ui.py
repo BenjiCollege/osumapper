@@ -13,6 +13,12 @@ from typing import Any
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from osumapper.difficulty import (
+    STANDARD_DIFFICULTY_KEYS,
+    resolve_standard_difficulty,
+    standard_difficulty,
+)
+from osumapper.errors import InputError
 from osumapper.paths import project_root
 from osumapper.presets import preset_names
 from osumapper.training.config import DatasetPaths
@@ -54,6 +60,8 @@ class GenerationOptions:
     threshold: float | None = None
     density: float | None = None
     difficulty: str | None = None
+    difficulty_tier: str = "hard"
+    target_stars: float = 3.35
     bpm: float | None = None
     offset_ms: int | None = None
     key_count: int = 4
@@ -140,6 +148,8 @@ def build_generate_command(source: Path, output: Path, options: GenerationOption
         command.extend(("--target-density", str(options.density)))
     if options.difficulty:
         command.extend(("--difficulty", options.difficulty))
+    command.extend(("--difficulty-tier", options.difficulty_tier))
+    command.extend(("--target-stars", str(options.target_stars)))
     if options.bpm is not None:
         command.extend(("--bpm", str(options.bpm)))
     if options.offset_ms is not None:
@@ -256,17 +266,20 @@ class OsumapperStudio:
         dataset_config = read_json(paths.config, default={})
         self.output_dir = tk.StringVar(value=str(root / "output"))
         self.preset = tk.StringVar(value="default")
-        self.mode = tk.StringVar(value="auto")
+        self.mode = tk.StringVar(value="standard")
         self.seed = tk.StringVar(value="2026")
         self.flow_engine = tk.StringVar(value="deterministic")
-        self.rhythm_engine = tk.StringVar(value="legacy")
+        self.rhythm_engine = tk.StringVar(value="modern")
         self.modern_model = tk.StringVar(
-            value=str(root / "models" / "modern" / "rhythm-conformer-v3")
+            value=str(root / "models" / "modern" / "rhythm-conformer-v4-standard-stars")
         )
         self.placement_model = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
         self.threshold = tk.StringVar()
         self.density = tk.StringVar()
         self.difficulty = tk.StringVar()
+        self.difficulty_tier = tk.StringVar(value="hard")
+        self.target_stars = tk.StringVar(value="3.35")
+        self.difficulty_tier.trace_add("write", self._sync_target_stars)
         self.bpm = tk.StringVar()
         self.offset = tk.StringVar()
         self.keys = tk.StringVar(value="4")
@@ -278,9 +291,9 @@ class OsumapperStudio:
         self.songs_root = tk.StringVar(value=str(dataset_config.get("songs_root", "")))
         self.include_unrated = tk.BooleanVar(value=False)
         self.trust_imported_osz = tk.BooleanVar(value=False)
-        self.train_architecture = tk.StringVar(value="conformer-v3")
+        self.train_architecture = tk.StringVar(value="conformer-v4")
         self.train_output = tk.StringVar(
-            value=str(root / "models" / "modern" / "rhythm-conformer-v3")
+            value=str(root / "models" / "modern" / "rhythm-conformer-v4-standard-stars")
         )
         self.placement_output = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
         self.epochs = tk.StringVar(value="50")
@@ -386,9 +399,7 @@ class OsumapperStudio:
         ).pack(anchor="w", pady=(5, 10))
         self._section(settings, "Generation controls")
         self._combo_row(settings, "Preset", self.preset, preset_names())
-        self._combo_row(
-            settings, "Mode", self.mode, ("auto", "standard", "taiko", "catch", "mania")
-        )
+        self._combo_row(settings, "Mode", self.mode, ("standard",))
         self._combo_row(
             settings,
             "Flow",
@@ -397,7 +408,23 @@ class OsumapperStudio:
         )
         self._combo_row(settings, "Rhythm", self.rhythm_engine, ("legacy", "modern"))
         self._entry_row(settings, "Seed", self.seed)
-        self._entry_row(settings, "Difficulty", self.difficulty)
+        self._entry_row(settings, "Source map selector", self.difficulty)
+        self._combo_row(
+            settings,
+            "Output difficulty",
+            self.difficulty_tier,
+            STANDARD_DIFFICULTY_KEYS,
+        )
+        self._entry_row(settings, "Target stars", self.target_stars)
+        ttk.Label(
+            settings,
+            text=(
+                "Easy 0.0–1.99★  •  Normal 2.0–2.69★  •  Hard 2.7–3.99★\n"
+                "Insane 4.0–5.29★  •  Expert 5.3–6.49★  •  Expert+ 6.5★+"
+            ),
+            style="CardText.TLabel",
+            wraplength=390,
+        ).pack(anchor="w", pady=(2, 7))
         self._entry_row(settings, "Modern model", self.modern_model)
         self._entry_row(settings, "Placement model", self.placement_model)
         advanced = ttk.LabelFrame(settings, text="Advanced overrides", padding=9)
@@ -406,7 +433,6 @@ class OsumapperStudio:
         self._entry_row(advanced, "Density", self.density)
         self._entry_row(advanced, "BPM", self.bpm)
         self._entry_row(advanced, "Offset ms", self.offset)
-        self._entry_row(advanced, "Mania keys", self.keys)
         actions = ttk.Frame(settings, style="Card.TFrame")
         actions.pack(fill="x", side="bottom")
         self.generate_button = ttk.Button(
@@ -435,7 +461,10 @@ class OsumapperStudio:
         ttk.Label(dataset, text="Dataset workspace", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             dataset,
-            text="Build deterministic song-level splits without modifying your Songs folder.",
+            text=(
+                "Scan loose legacy .osu maps and .osz packages together without modifying "
+                "your source folder."
+            ),
             style="CardText.TLabel",
             wraplength=410,
         ).pack(anchor="w", pady=(3, 14))
@@ -454,8 +483,8 @@ class OsumapperStudio:
         dataset_buttons = ttk.Frame(dataset, style="Card.TFrame")
         dataset_buttons.pack(fill="x")
         for text, action in (
-            ("1  Scan", "scan"),
-            ("2  Import .osz folder", "import-osz"),
+            ("1  Scan mixed source (.osu + .osz)", "scan"),
+            ("2  Append reviewed .osz folder", "import-osz"),
             ("3  Stats", "stats"),
             ("4  Split", "split"),
             ("5  Features", "features"),
@@ -487,8 +516,8 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Conformer-v3 uses GPU mixed precision, cached window shards, "
-                "and balanced song weighting. Existing v1/v2 models remain unchanged."
+                "Conformer-v4 learns osu!standard rhythm from real star ratings and the six "
+                "fixed difficulty tiers. Existing v1/v2/v3 models remain unchanged."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -497,8 +526,9 @@ class OsumapperStudio:
             model,
             "Architecture",
             self.train_architecture,
-            ("conformer-v3", "conformer-v2", "transformer-v1"),
+            ("conformer-v4", "conformer-v3", "conformer-v2", "transformer-v1"),
         )
+
         self._path_row(model, "Model output", self.train_output, self._choose_train_output)
         self._entry_row(model, "Epochs", self.epochs)
         self._entry_row(model, "Batch size", self.batch_size)
@@ -529,7 +559,7 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Resume only the exact same v3 output and split. "
+                "Resume only the exact same model output, architecture, and split. "
                 "Use a new folder when changing architecture or data."
             ),
             style="CardText.TLabel",
@@ -546,7 +576,7 @@ class OsumapperStudio:
         ttk.Label(model, text="Placement-v1", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             model,
-            text="Learn flow, object types, slider lengths, and combo changes after rhythm-v3.",
+            text="Learn flow, object types, slider lengths, and combo changes after rhythm-v4.",
             style="CardText.TLabel",
             wraplength=410,
         ).pack(anchor="w", pady=(3, 8))
@@ -562,6 +592,13 @@ class OsumapperStudio:
             text="Evaluate Placement-v1 on test songs",
             command=self._evaluate_placement,
         ).pack(fill="x", pady=3)
+
+    def _sync_target_stars(self, *_args: object) -> None:
+        try:
+            profile = standard_difficulty(self.difficulty_tier.get())
+        except InputError:
+            return
+        self.target_stars.set(f"{profile.default_stars:.2f}")
 
     def _build_activity_tab(self) -> None:
         header = ttk.Frame(self.activity_tab, style="Panel.TFrame")
@@ -730,11 +767,21 @@ class OsumapperStudio:
             keys = int(self.keys.get())
             offset = int(self.offset.get()) if self.offset.get().strip() else None
         except ValueError as exc:
-            raise ValueError("Seed, offset, and mania keys must be whole numbers.") from exc
+            raise ValueError("Seed and offset must be whole numbers.") from exc
         if not 1 <= keys <= 18:
             raise ValueError("Mania keys must be between 1 and 18.")
         threshold = self._optional_float(self.threshold.get(), "Threshold")
         density = self._optional_float(self.density.get(), "Density")
+        target_stars = self._optional_float(self.target_stars.get(), "Target stars")
+        if target_stars is None:
+            raise ValueError("Target stars is required for standard difficulty generation.")
+        try:
+            resolved_difficulty = resolve_standard_difficulty(
+                self.difficulty_tier.get(), target_stars
+            )
+        except InputError as exc:
+            raise ValueError(str(exc)) from exc
+        assert resolved_difficulty is not None
         if threshold is not None and not 0 < threshold < 1:
             raise ValueError("Threshold must be between 0 and 1.")
         if density is not None and not 0 < density <= 20:
@@ -762,6 +809,8 @@ class OsumapperStudio:
             threshold=threshold,
             density=density,
             difficulty=self.difficulty.get().strip() or None,
+            difficulty_tier=resolved_difficulty[0].key,
+            target_stars=resolved_difficulty[1],
             bpm=self._optional_float(self.bpm.get(), "BPM"),
             offset_ms=offset,
             key_count=keys,
@@ -789,7 +838,10 @@ class OsumapperStudio:
         reserved: set[Path] = set()
         jobs: list[tuple[str, list[str], Path]] = []
         for identifier, entry in ready:
-            base = output_root / f"{entry.source.stem}-osumapper-{options.preset}.osz"
+            base = output_root / (
+                f"{entry.source.stem}-osumapper-{options.difficulty_tier}-"
+                f"{options.target_stars:.2f}stars.osz"
+            )
             output = unique_output_path(base, reserved)
             reserved.add(output)
             entry.output = output
@@ -884,6 +936,8 @@ class OsumapperStudio:
                     self.sequence_length.get(),
                     "--audio-context-radius",
                     self.context_radius.get(),
+                    "--architecture",
+                    self.train_architecture.get(),
                 )
             )
         self._run_single(command, f"Dataset {action}")

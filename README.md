@@ -24,7 +24,9 @@ baseline and compatibility policy.
 - A locked, reproducible environment managed by [uv](https://docs.astral.sh/uv/).
 - Safe `.osz` extraction into isolated temporary directories.
 - Complete, deterministic `.osz` export and optional opening in osu!lazer.
-- Standard, taiko, catch, and mania generation paths.
+- A standard-only Conformer-v4 workflow with fixed star-rated difficulty tiers;
+  historical taiko, catch, and mania generation remains available through the
+  preserved legacy compatibility path.
 - A professional local queue UI with multi-file/folder drag-and-drop, training
   controls, progress, retry/clear actions, and per-package Lazer import.
 - Cross-platform timing estimation using librosa instead of `TimingAnlyz.exe`.
@@ -34,7 +36,8 @@ baseline and compatibility policy.
 - Fourteen migrated `.keras` rhythm models with deterministic prediction-parity
   manifests.
 - An opt-in local osu!standard dataset, safe curated `.osz` ingestion,
-  Transformer-v1, Conformer-v2, and faster Conformer-v3 training,
+  Transformer-v1, Conformer-v2, faster Conformer-v3, and star-conditioned
+  Conformer-v4 training,
   validation-only density calibration, held-out evaluation, and deterministic
   human-review packages.
 - Mixed-precision RTX training, optional XLA, float16 window shards, per-song
@@ -89,6 +92,36 @@ It does not modify Lazer's private `client.realm` database or hashed file storag
 
 When an `.osz` contains several difficulties, use `--difficulty` with a unique
 substring of the desired difficulty name.
+
+## Fixed osu!standard difficulty tiers
+
+Conformer-v4 trains and generates osu!standard only. Its model-level difficulty
+input contains exactly two values: the requested no-mod star rating and the fixed
+difficulty tier. OD, AR, CS, density, taiko, catch, and mania are not V4 model
+conditioning inputs. Map difficulty settings are applied from the selected profile,
+while [`rosu-pp-py`](https://pypi.org/project/rosu-pp-py/) calculates the real
+no-mod standard star value used for dataset labels and generated-output validation.
+
+| Tier | Accepted star range | Default target |
+|---|---:|---:|
+| Easy | 0.0★–1.99★ | 1.50★ |
+| Normal | 2.0★–2.69★ | 2.35★ |
+| Hard | 2.7★–3.99★ | 3.35★ |
+| Insane | 4.0★–5.29★ | 4.65★ |
+| Expert | 5.3★–6.49★ | 5.90★ |
+| Expert+ | 6.5★ and above | 7.00★ |
+
+Choose the tier and an exact target inside that tier:
+
+```powershell
+uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --difficulty-tier hard --target-stars 3.50 --open
+```
+
+The generated `.osu` is recalculated after rhythm and placement. The package is
+created only when its real star value is inside the selected band and within
+±0.25★ of the requested target; otherwise the command reports the measured value
+and asks for a density adjustment or more V4 training data. This prevents a
+filename from claiming a difficulty the map did not actually achieve.
 
 ## Command examples
 
@@ -194,8 +227,10 @@ The most useful `generate` options are:
 | Option | Purpose |
 | --- | --- |
 | `--preset NAME` | Select the model and generation parameters. |
-| `--mode MODE` | Select `standard`, `taiko`, `catch`, or `mania`. |
+| `--mode MODE` | Select a ruleset for legacy compatibility; Conformer-v4 accepts only `standard`. |
 | `--difficulty TEXT` | Select a difficulty from a multi-map `.osz`. |
+| `--difficulty-tier NAME` | Select `easy`, `normal`, `hard`, `insane`, `expert`, or `expert-plus` for V4 output. |
+| `--target-stars NUMBER` | Fix the requested no-mod standard star target inside the selected tier. |
 | `--seed INTEGER` | Set the deterministic seed; the default is `2026`. |
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
 | `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |
@@ -317,14 +352,21 @@ metadata can be non-fatal when extraction still finishes with zero failures.
 
 ### 1. Scan and curate a local dataset
 
-Point the scanner at an osu!stable-style Songs directory. Malformed maps, missing
-audio, converted maps, duplicates, and maps outside the configured quality bounds
-are recorded in `training_data/skipped.jsonl` instead of stopping the scan.
+Point the scanner at a mixed song source. One scan now reads both loose legacy
+`.osu` maps and every `.osz` package below the selected folder. Packages are safely
+extracted into the ignored, content-addressed `training_data/imported_osz/` cache;
+the original `.osz` files and legacy song folders are never modified. Duplicate
+`.osu` content is indexed once. Malformed maps, unsafe or invalid packages, missing
+audio, converted maps, and maps outside the configured quality bounds are recorded
+in `training_data/skipped.jsonl` instead of stopping the rest of the scan.
 
 ```powershell
 uv run osumapper dataset scan "E:\Games\osu!\Songs"
 uv run osumapper dataset stats
 ```
+
+Use `--no-osz` only when you intentionally want to ignore archives and scan loose
+legacy `.osu` files alone.
 
 The scanner writes scalar metadata to `training_data/dataset.parquet` and detailed
 per-map timing/object data under `training_data/maps/`. It supports UTF-8 and
@@ -343,9 +385,10 @@ Ratings persist in `training_data/ratings.json` and update the current Parquet
 index. By default, only maps marked `good` are eligible for training. Use
 `dataset split --include-unrated` only when you deliberately want unrated maps.
 
-Downloaded `.osz` packages do not need to be unpacked by hand. This safely
-extracts every package under the selected folder into the ignored training
-workspace and appends its maps without removing the existing Songs index:
+When `.osz` packages are already below the folder passed to `dataset scan`, no
+second import command is needed. The explicit `import-osz` command remains useful
+for appending a separate curated download folder without rescanning the main song
+source:
 
 ```powershell
 uv run osumapper dataset import-osz "C:\Users\bcten\Downloads\osz"
@@ -397,7 +440,79 @@ fed a shard at a time. Use `--rebuild` only after deliberately changing the
 preprocessing implementation; configuration and map hashes otherwise select the
 correct cache automatically.
 
-### 3. Preserve the completed baselines and train Conformer-v3
+### 3. Train standard-star Conformer-v4
+
+V4 changes the dataset schema because each standard map receives a real star
+rating and one of the six fixed tiers. Re-scan and rebuild the split, features, and
+V4 window shards. Existing ratings remain associated with map hashes, and existing
+V1–V3 model folders are not modified.
+
+```bash
+cd "$HOME/osumapper"
+set +H
+uv sync --locked --extra gpu
+uv run --extra gpu osumapper dataset scan \
+  '/mnt/e/Games/osu!/Songs' \
+  --data-root "$HOME/osumapper/training_data"
+uv run --extra gpu osumapper dataset stats \
+  --data-root "$HOME/osumapper/training_data"
+uv run --extra gpu osumapper dataset split \
+  --data-root "$HOME/osumapper/training_data" \
+  --seed 2026 \
+  --include-unrated
+uv run --extra gpu osumapper dataset features \
+  --data-root "$HOME/osumapper/training_data"
+uv run --extra gpu osumapper dataset windows \
+  --data-root "$HOME/osumapper/training_data" \
+  --architecture conformer-v4 \
+  --sequence-length 512 \
+  --audio-context-radius 0
+```
+
+`dataset stats` reports the star distribution and map count in every tier. The
+command above includes unrated maps to match the requested full collection; omit
+`--include-unrated` for the recommended accuracy run after enough maps in every
+tier have been reviewed and marked GOOD.
+
+Train the isolated V4 model on the RTX 4070:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --output "$HOME/osumapper/models/modern/rhythm-conformer-v4-standard-stars-mixed-20260811" \
+  --architecture conformer-v4 \
+  --epochs 75 \
+  --batch-size 32 \
+  --learning-rate 0.0005 \
+  --sequence-length 512 \
+  --audio-context-radius 0 \
+  --device gpu \
+  --precision mixed-float16 \
+  --xla auto \
+  --window-cache auto \
+  --early-stopping-patience 8 \
+  --lr-patience 3 \
+  --lr-factor 0.5 \
+  --weight-decay 0.0001 \
+  --seed 2026
+```
+
+Calibrate per-tier validation thresholds and evaluate once on held-out songs:
+
+```bash
+uv run --extra gpu osumapper train calibrate rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v4-standard-stars-mixed-20260811"
+uv run --extra gpu osumapper train evaluate rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v4-standard-stars-mixed-20260811"
+```
+
+The Studio defaults to standard mode, modern rhythm, Conformer-v4, Hard, and
+3.35★. Changing the tier updates its default target automatically. The CLI retains
+the older rulesets only so legacy snapshots and compatibility tests remain usable.
+
+#### Preserved V1–V3 baselines
 
 ```powershell
 uv run osumapper train rhythm --architecture transformer-v1 --epochs 50 --batch-size 16 --seed 2026 --device auto
@@ -842,6 +957,7 @@ models/                  Migrated legacy .keras models and parity manifests
 models/modern/rhythm/    Ignored local modern-model output after training
 models/modern/rhythm-conformer-v2/  Separate ignored Conformer-v2 output
 models/modern/rhythm-conformer-v3/  Faster isolated Conformer-v3 output
+models/modern/rhythm-conformer-v4-standard-stars/  Standard star-conditioned V4 output
 models/modern/placement-v1/         Learned flow/object-type output
 training_data/           Ignored metadata, imports, splits, features, and window shards
 tests/                   Fixtures, golden outputs, and regression tests

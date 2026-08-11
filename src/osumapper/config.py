@@ -49,6 +49,8 @@ class GenerationConfig:
     placement_model: Path | None = None
     rhythm_threshold: float | None = None
     target_density: float | None = None
+    difficulty_tier: str | None = None
+    target_stars: float | None = None
 
 
 def configure_determinism(seed: int) -> None:

@@ -4,6 +4,7 @@ import random
 from pathlib import Path
 from typing import Any
 
+from osumapper.difficulty import STAR_DIFFICULTY_FEATURES
 from osumapper.errors import InputError
 from osumapper.package import safe_filename
 from osumapper.pipeline import GenerationRequest, generate_package
@@ -68,6 +69,7 @@ def generate_review_packages(
     if config is None:
         raise InputError(f"Modern model configuration is missing under {root}.")
     chosen_threshold = prediction_threshold(config, threshold)
+    star_conditioned = tuple(config.get("difficulty_features", ())) == STAR_DIFFICULTY_FEATURES
     destination = (output or (Path.cwd() / "output" / "held-out-review")).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     rows = select_review_maps(dataset_root=dataset_root, model_root=root, count=count, seed=seed)
@@ -87,6 +89,8 @@ def generate_review_packages(
                 rhythm_engine="modern",
                 modern_model=root,
                 rhythm_threshold=chosen_threshold,
+                difficulty_tier=str(row["difficulty_tier"]) if star_conditioned else None,
+                target_stars=float(row["star_rating"]) if star_conditioned else None,
                 open_in_lazer=open_in_lazer,
             ),
             progress=lambda message, number=index: progress(f"[{number}] {message}"),
@@ -97,6 +101,8 @@ def generate_review_packages(
                 "song_id": row["song_id"],
                 "source_map": row["map_path"],
                 "source_objects_per_second": row["objects_per_second"],
+                "source_star_rating": row.get("star_rating"),
+                "difficulty_tier": row.get("difficulty_tier"),
                 "package": str(package),
             }
         )

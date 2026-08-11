@@ -8,6 +8,11 @@ from typing import Any
 
 import numpy as np
 
+from osumapper.difficulty import (
+    LEGACY_DIFFICULTY_FEATURES,
+    calculate_standard_stars,
+    difficulty_for_stars,
+)
 from osumapper.errors import InputError
 from osumapper.paths import project_root
 from osumapper.training.beatmaps import parse_standard_beatmap
@@ -24,7 +29,7 @@ from osumapper.training.grid import (
     create_timing_grid,
     grid_feature_array,
 )
-from osumapper.training.loader import PreparedMap, window_probabilities
+from osumapper.training.loader import PreparedMap, difficulty_feature_array, window_probabilities
 from osumapper.training.model import load_rhythm_model
 from osumapper.training.storage import read_json, write_json
 from osumapper.training.trainer import default_model_root
@@ -71,10 +76,13 @@ def analyze_map(
     if model_config is None or not model_path.is_file():
         raise InputError(f"Modern rhythm model is missing under {root}; train it first.")
     stats = parsed.statistics
+    star_rating = calculate_standard_stars(source)
+    difficulty_tier = difficulty_for_stars(star_rating).key
     selected_threshold = prediction_threshold(
         model_config,
         threshold,
         target_density=float(stats["objects_per_second"]),
+        difficulty_tier=difficulty_tier,
     )
     grid_config = GridConfig(
         sequence_length=int(model_config["training"]["sequence_length"]),
@@ -99,14 +107,16 @@ def analyze_map(
     labels = np.asarray([candidate.label for candidate in grid.candidates], dtype=np.float32)[
         :, None
     ]
-    difficulty = np.asarray(
-        [
-            parsed.difficulty["od"] / 10.0,
-            parsed.difficulty["ar"] / 10.0,
-            parsed.difficulty["cs"] / 10.0,
-            stats["objects_per_second"] / 10.0,
-        ],
-        dtype=np.float32,
+    difficulty = difficulty_feature_array(
+        {
+            "od": parsed.difficulty["od"],
+            "ar": parsed.difficulty["ar"],
+            "cs": parsed.difficulty["cs"],
+            "objects_per_second": stats["objects_per_second"],
+            "star_rating": star_rating,
+            "difficulty_tier": difficulty_tier,
+        },
+        tuple(model_config.get("difficulty_features", LEGACY_DIFFICULTY_FEATURES)),
     )
     prepared = PreparedMap(
         row={"map_path": str(source)},
@@ -156,6 +166,8 @@ def analyze_map(
         },
         "model": str(model_path),
         "threshold": selected_threshold,
+        "star_rating": star_rating,
+        "difficulty_tier": difficulty_tier,
         "human_objects": len(human_times),
         "model_predicted": len(predicted_times),
         "matched_musical_events": matched,

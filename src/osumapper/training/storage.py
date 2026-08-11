@@ -43,6 +43,8 @@ def dataset_schema() -> Any:
             ("tags", pa.string()),
             ("mode", pa.int8()),
             ("is_converted", pa.bool_()),
+            ("star_rating", pa.float32()),
+            ("difficulty_tier", pa.string()),
             ("hp", pa.float32()),
             ("cs", pa.float32()),
             ("od", pa.float32()),

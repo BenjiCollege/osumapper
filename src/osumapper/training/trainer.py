@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from osumapper.config import configure_determinism
+from osumapper.difficulty import LEGACY_DIFFICULTY_FEATURES, STAR_DIFFICULTY_FEATURES
 from osumapper.errors import DependencyError, InputError
 from osumapper.paths import legacy_v7_root, project_root
 from osumapper.training import MODERN_RHYTHM_MODEL_VERSION
@@ -41,14 +42,12 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
     return [index + 1 for index, value in enumerate(history.get("loss", [])) if float(value) <= 0.0]
 
 
-def default_model_root(architecture: str = "conformer-v3") -> Path:
-    name = (
-        "rhythm-conformer-v3"
-        if architecture == "conformer-v3"
-        else "rhythm-conformer-v2"
-        if architecture == "conformer-v2"
-        else "rhythm"
-    )
+def default_model_root(architecture: str = "conformer-v4") -> Path:
+    name = {
+        "conformer-v4": "rhythm-conformer-v4-standard-stars",
+        "conformer-v3": "rhythm-conformer-v3",
+        "conformer-v2": "rhythm-conformer-v2",
+    }.get(architecture, "rhythm")
     return project_root() / "models" / "modern" / name
 
 
@@ -197,6 +196,11 @@ def train_rhythm(
         sequence_length=training_config.sequence_length,
         prediction_threshold=training_config.prediction_threshold,
     )
+    difficulty_features = (
+        STAR_DIFFICULTY_FEATURES
+        if training_config.architecture == "conformer-v4"
+        else LEGACY_DIFFICULTY_FEATURES
+    )
     train_dataset, train_summary = make_tf_dataset(
         train_rows,
         dataset_root=paths.root,
@@ -209,6 +213,7 @@ def train_rhythm(
         cache_mode=training_config.window_cache,
         balance_songs=training_config.balance_songs,
         progress=lambda message: print(f"[windows] {message}"),
+        difficulty_features=difficulty_features,
     )
     validation_dataset, validation_summary = make_tf_dataset(
         validation_rows,
@@ -222,6 +227,7 @@ def train_rhythm(
         cache_mode=training_config.window_cache,
         balance_songs=False,
         progress=lambda message: print(f"[windows] {message}"),
+        difficulty_features=difficulty_features,
     )
 
     history: dict[str, list[float]] = {}
@@ -246,6 +252,11 @@ def train_rhythm(
             raise InputError("Cached audio feature dimensions changed; resume is unsafe.")
         if int(previous_config.get("grid_dimension", -1)) != train_summary.grid_dimension:
             raise InputError("Timing-grid feature dimensions changed; resume is unsafe.")
+        if (
+            int(previous_config.get("difficulty_dimension", -1))
+            != train_summary.difficulty_dimension
+        ):
+            raise InputError("Difficulty feature dimensions changed; resume is unsafe.")
         previous_architecture = str(previous_config.get("architecture", "transformer-v1"))
         if previous_architecture == "conv_audio_encoder_transformer":
             previous_architecture = "transformer-v1"
@@ -300,7 +311,9 @@ def train_rhythm(
                 positive_weight=train_summary.positive_weight,
                 jit_compile=jit_compile,
                 optimizer_name=(
-                    "adamw" if training_config.architecture == "conformer-v3" else "adam"
+                    "adamw"
+                    if training_config.architecture in {"conformer-v3", "conformer-v4"}
+                    else "adam"
                 ),
                 weight_decay=training_config.weight_decay,
             )
@@ -314,6 +327,7 @@ def train_rhythm(
                 architecture=training_config.architecture,
                 jit_compile=jit_compile,
                 weight_decay=training_config.weight_decay,
+                difficulty_dimension=train_summary.difficulty_dimension,
             )
         else:
             raise InputError(f"No resumable checkpoint exists under {output_root}.")
@@ -327,6 +341,7 @@ def train_rhythm(
             architecture=training_config.architecture,
             jit_compile=jit_compile,
             weight_decay=training_config.weight_decay,
+            difficulty_dimension=train_summary.difficulty_dimension,
         )
 
     class EpochProgress(keras.callbacks.Callback):
@@ -438,7 +453,8 @@ def train_rhythm(
             ),
             "audio_dimension": train_summary.audio_dimension,
             "grid_dimension": train_summary.grid_dimension,
-            "difficulty_features": ["OD", "AR", "CS", "objects_per_second"],
+            "difficulty_dimension": train_summary.difficulty_dimension,
+            "difficulty_features": list(difficulty_features),
             "class_weight_positive": train_summary.positive_weight,
             "window_cache": {
                 "train": train_summary.cache_path,

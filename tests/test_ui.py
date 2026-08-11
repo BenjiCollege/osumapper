@@ -44,7 +44,7 @@ class UiHelperTests(unittest.TestCase):
                 output,
                 GenerationOptions(
                     preset="default",
-                    mode="mania",
+                    mode="standard",
                     seed=2026,
                     flow_engine="deterministic",
                     rhythm_engine="modern",
@@ -62,6 +62,8 @@ class UiHelperTests(unittest.TestCase):
             self.assertIn("--placement-model", command)
             self.assertIn("--rhythm-threshold", command)
             self.assertIn("--target-density", command)
+            self.assertIn("--difficulty-tier", command)
+            self.assertIn("--target-stars", command)
             self.assertIn("--open", command)
             self.assertEqual(command[command.index("--keys") + 1], "7")
 

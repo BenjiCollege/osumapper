@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from osumapper.config import GameMode, GenerationConfig
+from osumapper.difficulty import resolve_standard_difficulty
 from osumapper.engine import generate_document
 from osumapper.errors import InputError
 from osumapper.lazer import open_in_lazer
@@ -29,6 +30,8 @@ class GenerationRequest:
     placement_model: Path | None = None
     rhythm_threshold: float | None = None
     target_density: float | None = None
+    difficulty_tier: str | None = None
+    target_stars: float | None = None
     audio: Path | None = None
     bpm: float | None = None
     offset_ms: int | None = None
@@ -47,6 +50,13 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         raise InputError("Target density must be greater than 0 and at most 20.")
     if request.flow_engine == "placement" and request.rhythm_engine != "modern":
         raise InputError("Placement-v1 requires --rhythm-engine modern.")
+    requested_difficulty = resolve_standard_difficulty(
+        request.difficulty_tier, request.target_stars
+    )
+    if requested_difficulty is not None and request.rhythm_engine != "modern":
+        raise InputError("Fixed star difficulty generation requires --rhythm-engine modern.")
+    if requested_difficulty is not None and request.mode not in {None, GameMode.STANDARD}:
+        raise InputError("Fixed star difficulty generation supports osu!standard only.")
     config = GenerationConfig(
         preset=request.preset,
         mode=request.mode,
@@ -60,6 +70,8 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         placement_model=request.placement_model,
         rhythm_threshold=request.rhythm_threshold,
         target_density=request.target_density,
+        difficulty_tier=(requested_difficulty[0].key if requested_difficulty else None),
+        target_stars=(requested_difficulty[1] if requested_difficulty else None),
     )
     progress("Opening input in an isolated workspace")
     with prepare_source(
@@ -71,6 +83,8 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         offset_ms=request.offset_ms,
         key_count=request.key_count,
     ) as workspace:
+        if requested_difficulty is not None and workspace.document.mode is not GameMode.STANDARD:
+            raise InputError("The selected source difficulty is not osu!standard mode.")
         source_mode = request.mode or workspace.document.mode
         preset = get_preset(request.preset, source_mode)
         generated = generate_document(

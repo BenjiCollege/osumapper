@@ -6,6 +6,7 @@ from typing import Any
 
 import numpy as np
 
+from osumapper.difficulty import LEGACY_DIFFICULTY_FEATURES, STANDARD_DIFFICULTY_KEYS
 from osumapper.errors import DependencyError, InputError
 from osumapper.training.config import DatasetPaths, GridConfig
 from osumapper.training.loader import prepare_map, window_probabilities
@@ -91,21 +92,30 @@ def calibrate_threshold(
 
     grid_config = GridConfig(sequence_length=int(config["training"]["sequence_length"]))
     model = load_rhythm_model(model_path, compile_model=False)
+    difficulty_features = tuple(config.get("difficulty_features", LEGACY_DIFFICULTY_FEATURES))
     labels: list[np.ndarray[Any, Any]] = []
     probabilities: list[np.ndarray[Any, Any]] = []
-    map_results: list[tuple[float, np.ndarray[Any, Any], np.ndarray[Any, Any]]] = []
+    map_results: list[tuple[float, str, np.ndarray[Any, Any], np.ndarray[Any, Any]]] = []
     for index, row in enumerate(rows, start=1):
         prepared = prepare_map(
             row,
             dataset_root=paths.root,
             grid_config=grid_config,
             audio_context_radius=int(config.get("audio_context_radius", 0)),
+            difficulty_features=difficulty_features,
         )
         map_labels = prepared.labels[:, 0].astype(np.uint8)
         map_probabilities = window_probabilities(model, prepared, grid_config.sequence_length)
         labels.append(map_labels)
         probabilities.append(map_probabilities)
-        map_results.append((float(row["objects_per_second"]), map_labels, map_probabilities))
+        map_results.append(
+            (
+                float(row["objects_per_second"]),
+                str(row.get("difficulty_tier", "")),
+                map_labels,
+                map_probabilities,
+            )
+        )
         if progress is not None and (index % 25 == 0 or index == len(rows)):
             progress(f"Calibrated {index}/{len(rows)} validation maps")
     label_array = np.concatenate(labels)
@@ -120,8 +130,8 @@ def calibrate_threshold(
         selected_maps = [item for item in map_results if minimum <= item[0] < maximum]
         if not selected_maps:
             continue
-        band_labels = np.concatenate([item[1] for item in selected_maps])
-        band_probabilities = np.concatenate([item[2] for item in selected_maps])
+        band_labels = np.concatenate([item[2] for item in selected_maps])
+        band_probabilities = np.concatenate([item[3] for item in selected_maps])
         if not 0 < int(band_labels.sum()) < int(band_labels.size):
             continue
         density_bands.append(
@@ -133,8 +143,24 @@ def calibrate_threshold(
                 **_select_threshold(band_labels, band_probabilities),
             }
         )
+    difficulty_tiers: list[dict[str, Any]] = []
+    for name in STANDARD_DIFFICULTY_KEYS:
+        selected_maps = [item for item in map_results if item[1] == name]
+        if not selected_maps:
+            continue
+        tier_labels = np.concatenate([item[2] for item in selected_maps])
+        tier_probabilities = np.concatenate([item[3] for item in selected_maps])
+        if not 0 < int(tier_labels.sum()) < int(tier_labels.size):
+            continue
+        difficulty_tiers.append(
+            {
+                "name": name,
+                "maps": len(selected_maps),
+                **_select_threshold(tier_labels, tier_probabilities),
+            }
+        )
     report = {
-        "version": 2,
+        "version": 3,
         "source_split": "validation",
         "selection_metric": "candidate_f1",
         "tie_break": "highest_threshold",
@@ -144,6 +170,7 @@ def calibrate_threshold(
         "validation_maps": len(rows),
         **overall,
         "density_bands": density_bands,
+        "difficulty_tiers": difficulty_tiers,
     }
     for key, value in report.items():
         if isinstance(value, float) and not math.isfinite(value):
@@ -169,6 +196,7 @@ def calibrate_threshold(
         )
     }
     config["calibration"]["density_bands"] = density_bands
+    config["calibration"]["difficulty_tiers"] = difficulty_tiers
     write_json(config_path, config)
     report["output"] = str(destination)
     return report
