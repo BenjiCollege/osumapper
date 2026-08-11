@@ -42,6 +42,14 @@ class FullSetTests(unittest.TestCase):
         self.assertLess(density, 3.85)
         self.assertGreater(flow_scale, 1.2)
 
+    def test_easy_retry_reduces_density_and_spacing_together(self) -> None:
+        profile = standard_difficulty("easy")
+        density, flow_scale = _next_full_set_controls(profile, 0.7, 1.0, 2.82)
+
+        self.assertLess(density, 0.5)
+        self.assertLess(flow_scale, 0.8)
+        self.assertGreaterEqual(flow_scale, 0.5)
+
     def test_deterministic_flow_scale_increases_mean_jump_distance(self) -> None:
         count = 24
         zeros = np.zeros(count, dtype=int)

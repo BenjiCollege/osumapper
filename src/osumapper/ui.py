@@ -387,9 +387,12 @@ class OsumapperStudio:
         pane = ttk.Panedwindow(self.generate_tab, orient="horizontal")
         pane.pack(fill="both", expand=True)
         queue_card = ttk.Frame(pane, style="Card.TFrame", padding=14)
-        settings = ttk.Frame(pane, style="Card.TFrame", padding=14, width=330)
+        settings_shell = ttk.Frame(pane, style="Card.TFrame", width=330)
+        actions = ttk.Frame(settings_shell, style="Card.TFrame", padding=(14, 9, 14, 14))
+        actions.pack(fill="x", side="bottom")
+        settings = self._scrollable_card(settings_shell)
         pane.add(queue_card, weight=3)
-        pane.add(settings, weight=2)
+        pane.add(settings_shell, weight=2)
 
         ttk.Label(queue_card, text="Generation queue", style="CardTitle.TLabel").pack(anchor="w")
         self.drop_zone = ttk.Label(
@@ -493,10 +496,11 @@ class OsumapperStudio:
         self._entry_row(advanced, "Density", self.density)
         self._entry_row(advanced, "BPM", self.bpm)
         self._entry_row(advanced, "Offset ms", self.offset)
-        actions = ttk.Frame(settings, style="Card.TFrame")
-        actions.pack(fill="x", side="bottom")
         self.generate_button = ttk.Button(
-            actions, text="Run queue", style="Accent.TButton", command=self._start_queue
+            actions,
+            text="Generate queued song(s)",
+            style="Accent.TButton",
+            command=self._start_queue,
         )
         self.generate_button.pack(side="left", fill="x", expand=True)
         self.stop_button = ttk.Button(

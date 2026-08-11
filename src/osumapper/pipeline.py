@@ -24,7 +24,8 @@ from osumapper.training.storage import write_json
 from osumapper.workspace import SUPPORTED_AUDIO, prepare_source
 
 Progress = Callable[[str], None]
-FULL_SET_MAX_ATTEMPTS = 4
+FULL_SET_MAX_ATTEMPTS = 6
+FULL_SET_PREFERRED_TIER_ERROR = 0.18
 FULL_SET_MAX_MEAN_STAR_ERROR = 0.15
 _GAMEPLAY_BLOCKING_CRITERIA = {
     "objects_on_same_tick",
@@ -109,9 +110,13 @@ def _next_full_set_controls(
     flow_scale: float,
     actual_stars: float,
 ) -> tuple[float, float]:
+    ratio = profile.default_stars / max(0.1, actual_stars)
+    if profile.key in {"easy", "normal"}:
+        next_density = density * max(0.7, min(1.3, ratio**0.6))
+        next_flow = flow_scale * max(0.75, min(1.25, ratio**0.5))
+        return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
     if profile.key not in {"expert", "expert-plus"}:
         return _next_density(density, profile.default_stars, actual_stars), flow_scale
-    ratio = profile.default_stars / max(0.1, actual_stars)
     next_density = density * max(0.9, min(1.1, ratio**0.25))
     next_flow = flow_scale * max(0.75, min(1.35, ratio**1.2))
     return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
@@ -156,7 +161,7 @@ def _generate_full_set_difficulty(
         error = abs(actual_stars - profile.default_stars)
         if best is None or error < abs(best[1] - profile.default_stars):
             best = (generated, actual_stars, density, flow_scale, attempt)
-        if profile.contains(actual_stars) and error <= STAR_TARGET_TOLERANCE:
+        if profile.contains(actual_stars) and error <= FULL_SET_PREFERRED_TIER_ERROR:
             return FullSetDifficultyResult(
                 profile=profile,
                 document=generated,
@@ -172,7 +177,22 @@ def _generate_full_set_difficulty(
             actual_stars,
         )
     assert best is not None
-    _document, actual_stars, used_density, used_flow_scale, attempts = best
+    best_document, actual_stars, used_density, used_flow_scale, attempts = best
+    if profile.contains(actual_stars) and (
+        abs(actual_stars - profile.default_stars) <= STAR_TARGET_TOLERANCE
+    ):
+        progress(
+            f"Using best valid {profile.label} result {actual_stars:.2f}★ "
+            "after exhausting refinement attempts"
+        )
+        return FullSetDifficultyResult(
+            profile=profile,
+            document=best_document,
+            actual_stars=actual_stars,
+            density=used_density,
+            flow_scale=used_flow_scale,
+            attempts=attempts,
+        )
     raise GenerationError(
         f"FullSet-v1 could not reach {profile.label} {profile.default_stars:.2f}★ "
         f"within ±{STAR_TARGET_TOLERANCE:.2f}★ after {attempts} attempts. "

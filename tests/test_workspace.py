@@ -5,14 +5,26 @@ import unittest
 import zipfile
 from pathlib import Path
 
+from osumapper.beatmap import BeatmapDocument
 from osumapper.errors import InputError, PackageSafetyError
 from osumapper.package import validate_osz, write_osz
-from osumapper.workspace import prepare_source, safe_extract_osz
+from osumapper.workspace import _add_default_background, prepare_source, safe_extract_osz
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_audio_only_background_is_valid_png_and_referenced(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            document = BeatmapDocument.read(FIXTURES / "standard.osu")
+
+            updated = _add_default_background(document, root)
+
+            background = root / "osumapper-background.png"
+            self.assertTrue(background.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+            self.assertIn('0,0,"osumapper-background.png",0,0', updated.sections()["Events"])
+
     def test_rejects_zip_slip(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

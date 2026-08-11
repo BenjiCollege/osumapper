@@ -3,8 +3,10 @@ from __future__ import annotations
 import re
 import shutil
 import stat
+import struct
 import tempfile
 import zipfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -17,6 +19,29 @@ MAX_ARCHIVE_FILES = 20_000
 MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 SUPPORTED_AUDIO = {".mp3", ".ogg", ".wav", ".flac", ".m4a", ".aac", ".opus"}
 _QUOTED_ASSET = re.compile(r'"(?P<name>[^"\r\n]+)"')
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    checksum = zlib.crc32(kind + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", checksum)
+
+
+def _add_default_background(document: BeatmapDocument, root: Path) -> BeatmapDocument:
+    filename = "osumapper-background.png"
+    width, height = 1280, 720
+    pixel = bytes((11, 16, 32))
+    raw = (b"\x00" + pixel * width) * height
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(raw, level=9))
+        + _png_chunk(b"IEND", b"")
+    )
+    (root / filename).write_bytes(png)
+    return document.replace_section(
+        "Events",
+        ["//Background and Video events", f'0,0,"{filename}",0,0'],
+    )
 
 
 def _copy_explicit_map_assets(source: Path, root: Path, document: BeatmapDocument) -> None:
@@ -160,6 +185,7 @@ def prepare_source(
             target_map = root / f"{source.stem} [Auto-timed].osu"
             target_map.write_text(text, encoding="utf-8", newline="")
             document = BeatmapDocument.read(target_map)
+            document = _add_default_background(document, root)
         else:
             raise InputError("Input must be a .osz, .osu, or supported audio file.")
 
