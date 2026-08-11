@@ -22,6 +22,8 @@ from osumapper.training.evaluation import evaluate_rhythm
 from osumapper.training.features import extract_dataset_features
 from osumapper.training.loader import iter_windows, summarize_loader
 from osumapper.training.model import build_rhythm_model, load_rhythm_model
+from osumapper.training.placement import analyze_placement
+from osumapper.training.placement_learning import build_placement_model, predict_placement
 from osumapper.training.splits import load_split, split_dataset
 from osumapper.training.storage import read_json, write_json
 from osumapper.training.trainer import historical_empty_epochs, train_rhythm
@@ -81,6 +83,87 @@ class TrainingModelTests(unittest.TestCase):
 
             self.assertEqual(model.name, "osumapper_rhythm_conformer_v2")
             self.assertEqual(prediction.shape, (1, 16, 1))
+            np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
+
+    def test_conformer_v3_builds_with_float32_probability_output(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            model = build_rhythm_model(
+                audio_dimension=20,
+                grid_dimension=6,
+                sequence_length=16,
+                architecture="conformer-v3",
+                model_dimension=40,
+                transformer_blocks=1,
+                attention_heads=5,
+                weight_decay=1e-4,
+                jit_compile=False,
+            )
+            inputs = {
+                "audio_features": np.zeros((1, 16, 20), dtype=np.float16),
+                "grid_features": np.zeros((1, 16, 6), dtype=np.float16),
+                "difficulty": np.zeros((1, 4), dtype=np.float16),
+            }
+            inputs["grid_features"][0, :4, 0] = 0.4
+            prediction = model.predict(inputs, verbose=0)
+            destination = Path(name) / "conformer-v3.keras"
+            model.save(destination)
+            loaded = load_rhythm_model(destination, compile_model=False)
+            reloaded = loaded.predict(inputs, verbose=0)
+
+            self.assertEqual(model.name, "osumapper_rhythm_conformer_v3")
+            self.assertEqual(prediction.dtype, np.float32)
+            self.assertEqual(prediction.shape, (1, 16, 1))
+            np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
+
+    def test_placement_analyzer_reports_safe_fixture(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            _write_tone(root / "audio.wav", 440.0)
+            map_path = root / "map.osu"
+            map_path.write_text(_map_text(beatmap_id=1, beatmapset_id=2), encoding="utf-8")
+            report = analyze_placement(map_path, output=root / "placement.json")
+
+            self.assertEqual(report["metrics"]["offscreen_objects"], 0)
+            self.assertEqual(report["quality_score"], 100)
+            self.assertTrue(Path(report["output"]).is_file())
+
+    def test_placement_v1_builds_and_round_trips(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            model = build_placement_model(
+                sequence_length=16,
+                learning_rate=1e-3,
+                jit_compile=False,
+            )
+            inputs = np.zeros((1, 16, 11), dtype=np.float32)
+            inputs[0, :4, 6] = 0.2
+            targets = np.zeros((1, 16, 8), dtype=np.float32)
+            targets[0, :4, 2] = 1.0
+            targets[0, :4, 3] = 1.0
+            weights = np.zeros((1, 16), dtype=np.float32)
+            weights[0, :4] = 1.0
+            loss = model.train_on_batch(inputs, targets, sample_weight=weights)
+            prediction = model.predict(inputs, verbose=0)
+            destination = Path(name) / "placement.keras"
+            model.save(destination)
+            write_json(
+                Path(name) / "config.json",
+                {"training": {"sequence_length": 16}},
+            )
+            loaded = load_rhythm_model(destination, compile_model=False)
+            reloaded = loaded.predict(inputs, verbose=0)
+            placed = predict_placement(
+                BeatmapDocument.read(FIXTURES / "standard.osu"),
+                np.asarray([500, 1_000, 1_500, 2_500]),
+                model_root=destination,
+                target_density=2.0,
+                seed=2026,
+            )
+
+            self.assertEqual(model.name, "osumapper_placement_v1")
+            self.assertTrue(np.isfinite(loss))
+            self.assertEqual(prediction.shape, (1, 16, 8))
+            self.assertEqual(len(placed), 4)
+            self.assertTrue(all(0 <= obj["x"] <= 512 and 0 <= obj["y"] <= 384 for obj in placed))
             np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
 
     def test_loader_training_and_held_out_evaluation_smoke(self) -> None:

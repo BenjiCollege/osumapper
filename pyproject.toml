@@ -32,6 +32,11 @@ dependencies = [
   "tkinterdnd2>=0.4,<1",
 ]
 
+[project.optional-dependencies]
+gpu = [
+  "tensorflow[and-cuda]>=2.18,<2.21; sys_platform == 'linux'",
+]
+
 [project.urls]
 "Original project" = "https://github.com/kotritrona/osumapper"
 "Original creator" = "https://github.com/kotritrona"

@@ -3,11 +3,17 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 from osumapper.training.beatmaps import parse_standard_beatmap
 from osumapper.training.config import DatasetPaths, QualityConfig
-from osumapper.training.dataset import dataset_statistics, rate_map, scan_dataset
+from osumapper.training.dataset import (
+    dataset_statistics,
+    import_osz_dataset,
+    rate_map,
+    scan_dataset,
+)
 from osumapper.training.storage import read_parquet
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -23,6 +29,47 @@ def _difficulty_text(*, version: str, beatmap_id: int, beatmapset_id: int = 100)
 
 
 class TrainingDatasetTests(unittest.TestCase):
+    def test_osz_import_safely_appends_and_can_mark_reviewed_maps_good(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            songs = root / "Songs"
+            stable_set = songs / "100"
+            stable_set.mkdir(parents=True)
+            (stable_set / "audio.wav").write_bytes(b"RIFF-stable")
+            (stable_set / "stable.osu").write_text(
+                _difficulty_text(version="Stable", beatmap_id=1, beatmapset_id=100),
+                encoding="utf-8",
+            )
+            data_root = root / "training_data"
+            scan_dataset(
+                songs,
+                dataset_root=data_root,
+                quality=QualityConfig(min_objects=1, min_duration_ms=0),
+                progress=lambda _message: None,
+            )
+            package = root / "curated.osz"
+            with zipfile.ZipFile(package, "w") as archive:
+                archive.writestr("audio.wav", b"RIFF-curated")
+                archive.writestr(
+                    "curated.osu",
+                    _difficulty_text(version="Curated", beatmap_id=2, beatmapset_id=200),
+                )
+
+            result = import_osz_dataset(
+                package,
+                dataset_root=data_root,
+                rating="good",
+                quality=QualityConfig(min_objects=1, min_duration_ms=0),
+                progress=lambda _message: None,
+            )
+            rows = read_parquet(DatasetPaths.at(data_root).dataset)
+
+            self.assertEqual(result["packages"], 1)
+            self.assertEqual(len(rows), 2)
+            curated = next(row for row in rows if row["beatmapset_id"] == 200)
+            self.assertEqual(curated["rating"], "good")
+            self.assertEqual(curated["quality_status"], "good")
+
     def test_standard_parser_extracts_slider_timing_and_statistics(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

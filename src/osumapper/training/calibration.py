@@ -32,6 +32,33 @@ def _model_paths(model_root: Path | None) -> tuple[Path, Path]:
     return root, model
 
 
+def _select_threshold(
+    labels: np.ndarray[Any, Any], probabilities: np.ndarray[Any, Any]
+) -> dict[str, float | int]:
+    average_precision_score, precision_recall_curve = _metrics()
+    precision, recall, thresholds = precision_recall_curve(labels, probabilities)
+    if thresholds.size == 0:
+        raise InputError("Validation predictions did not produce a usable threshold.")
+    f1 = np.divide(
+        2.0 * precision[:-1] * recall[:-1],
+        precision[:-1] + recall[:-1],
+        out=np.zeros_like(thresholds, dtype=np.float64),
+        where=(precision[:-1] + recall[:-1]) > 0,
+    )
+    best_f1 = float(np.max(f1))
+    candidates = np.flatnonzero(np.isclose(f1, best_f1, rtol=0.0, atol=1e-12))
+    selected = int(candidates[np.argmax(thresholds[candidates])])
+    return {
+        "candidate_positions": int(labels.size),
+        "positive_positions": int(labels.sum()),
+        "threshold": float(thresholds[selected]),
+        "precision": float(precision[selected]),
+        "recall": float(recall[selected]),
+        "f1": best_f1,
+        "pr_auc": float(average_precision_score(labels, probabilities)),
+    }
+
+
 def calibrate_threshold(
     *,
     dataset_root: Path | None = None,
@@ -66,6 +93,7 @@ def calibrate_threshold(
     model = load_rhythm_model(model_path, compile_model=False)
     labels: list[np.ndarray[Any, Any]] = []
     probabilities: list[np.ndarray[Any, Any]] = []
+    map_results: list[tuple[float, np.ndarray[Any, Any], np.ndarray[Any, Any]]] = []
     for index, row in enumerate(rows, start=1):
         prepared = prepare_map(
             row,
@@ -73,29 +101,40 @@ def calibrate_threshold(
             grid_config=grid_config,
             audio_context_radius=int(config.get("audio_context_radius", 0)),
         )
-        labels.append(prepared.labels[:, 0].astype(np.uint8))
-        probabilities.append(window_probabilities(model, prepared, grid_config.sequence_length))
+        map_labels = prepared.labels[:, 0].astype(np.uint8)
+        map_probabilities = window_probabilities(model, prepared, grid_config.sequence_length)
+        labels.append(map_labels)
+        probabilities.append(map_probabilities)
+        map_results.append((float(row["objects_per_second"]), map_labels, map_probabilities))
         if progress is not None and (index % 25 == 0 or index == len(rows)):
             progress(f"Calibrated {index}/{len(rows)} validation maps")
     label_array = np.concatenate(labels)
     probability_array = np.concatenate(probabilities)
-    average_precision_score, precision_recall_curve = _metrics()
-    precision, recall, thresholds = precision_recall_curve(label_array, probability_array)
-    if thresholds.size == 0:
-        raise InputError("Validation predictions did not produce a usable threshold.")
-    f1 = np.divide(
-        2.0 * precision[:-1] * recall[:-1],
-        precision[:-1] + recall[:-1],
-        out=np.zeros_like(thresholds, dtype=np.float64),
-        where=(precision[:-1] + recall[:-1]) > 0,
-    )
-    best_f1 = float(np.max(f1))
-    candidates = np.flatnonzero(np.isclose(f1, best_f1, rtol=0.0, atol=1e-12))
-    # A higher threshold is the conservative tie-break: fewer unwanted objects.
-    selected = int(candidates[np.argmax(thresholds[candidates])])
-    threshold = float(thresholds[selected])
+    overall = _select_threshold(label_array, probability_array)
+    density_bands: list[dict[str, Any]] = []
+    for name, minimum, maximum in (
+        ("low", 0.0, 1.5),
+        ("medium", 1.5, 3.0),
+        ("high", 3.0, 20.000001),
+    ):
+        selected_maps = [item for item in map_results if minimum <= item[0] < maximum]
+        if not selected_maps:
+            continue
+        band_labels = np.concatenate([item[1] for item in selected_maps])
+        band_probabilities = np.concatenate([item[2] for item in selected_maps])
+        if not 0 < int(band_labels.sum()) < int(band_labels.size):
+            continue
+        density_bands.append(
+            {
+                "name": name,
+                "minimum_density": minimum,
+                "maximum_density": maximum,
+                "maps": len(selected_maps),
+                **_select_threshold(band_labels, band_probabilities),
+            }
+        )
     report = {
-        "version": 1,
+        "version": 2,
         "source_split": "validation",
         "selection_metric": "candidate_f1",
         "tie_break": "highest_threshold",
@@ -103,13 +142,8 @@ def calibrate_threshold(
         "model": str(model_path),
         "validation_songs": len(validation_songs),
         "validation_maps": len(rows),
-        "candidate_positions": int(label_array.size),
-        "positive_positions": int(label_array.sum()),
-        "threshold": threshold,
-        "precision": float(precision[selected]),
-        "recall": float(recall[selected]),
-        "f1": best_f1,
-        "pr_auc": float(average_precision_score(label_array, probability_array)),
+        **overall,
+        "density_bands": density_bands,
     }
     for key, value in report.items():
         if isinstance(value, float) and not math.isfinite(value):
@@ -134,6 +168,7 @@ def calibrate_threshold(
             "pr_auc",
         )
     }
+    config["calibration"]["density_bands"] = density_bands
     write_json(config_path, config)
     report["output"] = str(destination)
     return report

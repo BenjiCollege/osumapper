@@ -104,7 +104,6 @@ def predict_modern_rhythm(
         raise InputError(
             f"Modern rhythm model is missing under {root}. Run `osumapper train rhythm`."
         )
-    selected_threshold = prediction_threshold(config, threshold)
     raw_audio_config = config.get("audio_features") or {}
     audio_config = (
         AudioFeatureConfig(**raw_audio_config) if raw_audio_config else AudioFeatureConfig()
@@ -119,6 +118,11 @@ def predict_modern_rhythm(
     )
     if not 0 < density <= 20:
         raise InputError("Target density must be greater than 0 and no more than 20 objects/sec.")
+    selected_threshold = prediction_threshold(
+        config,
+        threshold,
+        target_density=density,
+    )
     grid_config = GridConfig(
         sequence_length=int(config["training"]["sequence_length"]),
         prediction_threshold=selected_threshold,

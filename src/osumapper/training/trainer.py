@@ -41,8 +41,14 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
     return [index + 1 for index, value in enumerate(history.get("loss", [])) if float(value) <= 0.0]
 
 
-def default_model_root(architecture: str = "transformer-v1") -> Path:
-    name = "rhythm-conformer-v2" if architecture == "conformer-v2" else "rhythm"
+def default_model_root(architecture: str = "conformer-v3") -> Path:
+    name = (
+        "rhythm-conformer-v3"
+        if architecture == "conformer-v3"
+        else "rhythm-conformer-v2"
+        if architecture == "conformer-v2"
+        else "rhythm"
+    )
     return project_root() / "models" / "modern" / name
 
 
@@ -59,7 +65,7 @@ def _safe_output(path: Path) -> Path:
     return output
 
 
-def _configure_device(device: str) -> tuple[Any, Any]:
+def _configure_device(device: str, precision: str = "auto") -> tuple[Any, Any, str]:
     os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
     try:
@@ -70,17 +76,44 @@ def _configure_device(device: str) -> tuple[Any, Any]:
     normalized = device.casefold()
     if normalized not in {"auto", "cpu", "gpu"}:
         raise InputError("--device must be auto, cpu, or gpu.")
+    normalized_precision = precision.casefold()
+    if normalized_precision not in {"auto", "float32", "mixed-float16"}:
+        raise InputError("--precision must be auto, float32, or mixed-float16.")
     gpus = tf.config.list_physical_devices("GPU")
     try:
         if normalized == "cpu":
             tf.config.set_visible_devices([], "GPU")
         elif normalized == "gpu" and not gpus:
             raise InputError("--device gpu was requested, but TensorFlow found no GPU.")
+        if normalized != "cpu":
+            for gpu in gpus:
+                tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as exc:
         raise InputError(
             f"Could not configure TensorFlow device before initialization: {exc}"
         ) from exc
-    return keras, tf
+    gpu_enabled = normalized != "cpu" and bool(gpus)
+    resolved_precision = (
+        "mixed_float16"
+        if normalized_precision == "mixed-float16"
+        or (normalized_precision == "auto" and gpu_enabled)
+        else "float32"
+    )
+    if resolved_precision == "mixed_float16" and not gpu_enabled:
+        raise InputError("Mixed float16 was requested, but TensorFlow found no GPU.")
+    keras.mixed_precision.set_global_policy(resolved_precision)
+    return keras, tf, resolved_precision
+
+
+def _jit_compile(mode: str, *, gpu_enabled: bool) -> bool | str:
+    normalized = mode.casefold()
+    if normalized not in {"auto", "on", "off"}:
+        raise InputError("--xla must be auto, on, or off.")
+    if normalized == "on":
+        return True
+    if normalized == "off":
+        return False
+    return "auto" if gpu_enabled else False
 
 
 def train_rhythm(
@@ -91,7 +124,23 @@ def train_rhythm(
     resume: bool = False,
 ) -> TrainingResult:
     training_config = config or RhythmTrainingConfig()
-    keras, _ = _configure_device(training_config.device)
+    keras, tf, resolved_precision = _configure_device(
+        training_config.device, training_config.precision
+    )
+    gpu_enabled = bool(tf.config.get_visible_devices("GPU"))
+    jit_compile = _jit_compile(training_config.xla, gpu_enabled=gpu_enabled)
+    if training_config.early_stopping_patience < 0:
+        raise InputError("--early-stopping-patience cannot be negative.")
+    if training_config.learning_rate_patience <= 0:
+        raise InputError("--lr-patience must be positive.")
+    if not 0 < training_config.learning_rate_factor < 1:
+        raise InputError("--lr-factor must be between 0 and 1.")
+    if not 0 < training_config.minimum_learning_rate <= training_config.learning_rate:
+        raise InputError(
+            "--min-learning-rate must be positive and no greater than the initial rate."
+        )
+    if training_config.weight_decay < 0:
+        raise InputError("--weight-decay cannot be negative.")
     configure_determinism(training_config.seed)
     paths = DatasetPaths.at(dataset_root)
     paths.create()
@@ -156,6 +205,10 @@ def train_rhythm(
         seed=training_config.seed,
         shuffle=True,
         audio_context_radius=training_config.audio_context_radius,
+        cache_split="train",
+        cache_mode=training_config.window_cache,
+        balance_songs=training_config.balance_songs,
+        progress=lambda message: print(f"[windows] {message}"),
     )
     validation_dataset, validation_summary = make_tf_dataset(
         validation_rows,
@@ -165,6 +218,10 @@ def train_rhythm(
         seed=training_config.seed,
         shuffle=False,
         audio_context_radius=training_config.audio_context_radius,
+        cache_split="validation",
+        cache_mode=training_config.window_cache,
+        balance_songs=False,
+        progress=lambda message: print(f"[windows] {message}"),
     )
 
     history: dict[str, list[float]] = {}
@@ -194,6 +251,29 @@ def train_rhythm(
             previous_architecture = "transformer-v1"
         if previous_architecture != training_config.architecture:
             raise InputError("--architecture must match the original run when resuming.")
+        current_training = training_config.as_dict()
+        changed_resume_fields = [
+            name
+            for name in (
+                "batch_size",
+                "learning_rate",
+                "seed",
+                "precision",
+                "xla",
+                "early_stopping_patience",
+                "learning_rate_patience",
+                "learning_rate_factor",
+                "minimum_learning_rate",
+                "balance_songs",
+                "weight_decay",
+            )
+            if name in previous_training and previous_training[name] != current_training[name]
+        ]
+        if changed_resume_fields:
+            raise InputError(
+                "Resume settings must match the original run; changed: "
+                + ", ".join(changed_resume_fields)
+            )
         if (
             int(previous_config.get("audio_context_radius", 0))
             != training_config.audio_context_radius
@@ -218,6 +298,11 @@ def train_rhythm(
                 model,
                 learning_rate=training_config.learning_rate,
                 positive_weight=train_summary.positive_weight,
+                jit_compile=jit_compile,
+                optimizer_name=(
+                    "adamw" if training_config.architecture == "conformer-v3" else "adam"
+                ),
+                weight_decay=training_config.weight_decay,
             )
         elif resume_path.exists():
             model = build_rhythm_model(
@@ -227,6 +312,8 @@ def train_rhythm(
                 learning_rate=training_config.learning_rate,
                 positive_weight=train_summary.positive_weight,
                 architecture=training_config.architecture,
+                jit_compile=jit_compile,
+                weight_decay=training_config.weight_decay,
             )
         else:
             raise InputError(f"No resumable checkpoint exists under {output_root}.")
@@ -238,6 +325,8 @@ def train_rhythm(
             learning_rate=training_config.learning_rate,
             positive_weight=train_summary.positive_weight,
             architecture=training_config.architecture,
+            jit_compile=jit_compile,
+            weight_decay=training_config.weight_decay,
         )
 
     class EpochProgress(keras.callbacks.Callback):
@@ -284,12 +373,13 @@ def train_rhythm(
                 f"pr_auc={float(values.get('pr_auc', 0.0)):.4f}",
                 f"val_f1={float(values.get('val_f1', 0.0)):.4f}",
                 f"val_pr_auc={float(values.get('val_pr_auc', 0.0)):.4f}",
+                f"lr={float(keras.ops.convert_to_numpy(self.model.optimizer.learning_rate)):.2g}",
                 f"eta={remaining / 60.0:.1f}m",
             ]
             print(" | ".join(fields), flush=True)
 
     previous_best = max(history.get("val_pr_auc", []), default=None)
-    callbacks = [
+    callbacks: list[Any] = [
         keras.callbacks.ModelCheckpoint(
             filepath=best_path,
             monitor="val_pr_auc",
@@ -307,12 +397,40 @@ def train_rhythm(
         ),
         EpochProgress(),
     ]
+    callbacks.append(
+        keras.callbacks.ReduceLROnPlateau(
+            monitor="val_pr_auc",
+            mode="max",
+            factor=training_config.learning_rate_factor,
+            patience=training_config.learning_rate_patience,
+            min_lr=training_config.minimum_learning_rate,
+            verbose=1,
+        )
+    )
+    if training_config.early_stopping_patience:
+        callbacks.append(
+            keras.callbacks.EarlyStopping(
+                monitor="val_pr_auc",
+                mode="max",
+                min_delta=1e-4,
+                patience=training_config.early_stopping_patience,
+                baseline=previous_best,
+                restore_best_weights=False,
+                verbose=1,
+            )
+        )
     write_json(
         config_path,
         {
             "model_version": MODERN_RHYTHM_MODEL_VERSION,
             "architecture": training_config.architecture,
             "audio_context_radius": training_config.audio_context_radius,
+            "runtime": {
+                "precision": resolved_precision,
+                "xla": training_config.xla,
+                "jit_compile": jit_compile,
+                "gpu": gpu_enabled,
+            },
             "training": training_config.as_dict(),
             "grid": grid_config.as_dict(),
             "audio_features": read_json(paths.features / "manifest.json", default={}).get(
@@ -322,6 +440,11 @@ def train_rhythm(
             "grid_dimension": train_summary.grid_dimension,
             "difficulty_features": ["OD", "AR", "CS", "objects_per_second"],
             "class_weight_positive": train_summary.positive_weight,
+            "window_cache": {
+                "train": train_summary.cache_path,
+                "validation": validation_summary.cache_path,
+                "song_balanced": train_summary.song_balanced,
+            },
         },
     )
     dataset_manifest = {
@@ -351,11 +474,28 @@ def train_rhythm(
         last_model = load_rhythm_model(last_path, compile_model=False)
         last_model.save(model_path)
     completed_state = read_json(state_path, default={})
+    completed_epochs = int(completed_state.get("epochs_completed", len(history.get("loss", []))))
+    best_values = history.get("val_pr_auc", [])
+    best_epoch = (
+        max(range(len(best_values)), key=lambda index: float(best_values[index])) + 1
+        if best_values
+        else None
+    )
+    write_json(
+        state_path,
+        {
+            **completed_state,
+            "epochs_completed": completed_epochs,
+            "target_epochs": training_config.epochs,
+            "best_epoch": best_epoch,
+            "stopped_early": completed_epochs < training_config.epochs,
+        },
+    )
     return TrainingResult(
         output=output_root,
         model=model_path,
         best_checkpoint=best_path,
-        epochs_completed=int(completed_state.get("epochs_completed", len(history.get("loss", [])))),
+        epochs_completed=completed_epochs,
         train=train_summary,
         validation=validation_summary,
     )

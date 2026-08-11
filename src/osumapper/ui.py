@@ -50,6 +50,7 @@ class GenerationOptions:
     flow_engine: str = "auto"
     rhythm_engine: str = "legacy"
     modern_model: Path | None = None
+    placement_model: Path | None = None
     threshold: float | None = None
     density: float | None = None
     difficulty: str | None = None
@@ -131,6 +132,8 @@ def build_generate_command(source: Path, output: Path, options: GenerationOption
         command.extend(("--mode", options.mode))
     if options.modern_model is not None:
         command.extend(("--modern-model", str(options.modern_model)))
+    if options.placement_model is not None:
+        command.extend(("--placement-model", str(options.placement_model)))
     if options.threshold is not None:
         command.extend(("--rhythm-threshold", str(options.threshold)))
     if options.density is not None:
@@ -257,7 +260,10 @@ class OsumapperStudio:
         self.seed = tk.StringVar(value="2026")
         self.flow_engine = tk.StringVar(value="deterministic")
         self.rhythm_engine = tk.StringVar(value="legacy")
-        self.modern_model = tk.StringVar(value=str(root / "models" / "modern" / "rhythm"))
+        self.modern_model = tk.StringVar(
+            value=str(root / "models" / "modern" / "rhythm-conformer-v3")
+        )
+        self.placement_model = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
         self.threshold = tk.StringVar()
         self.density = tk.StringVar()
         self.difficulty = tk.StringVar()
@@ -271,16 +277,24 @@ class OsumapperStudio:
         self.data_root = tk.StringVar(value=str(paths.root))
         self.songs_root = tk.StringVar(value=str(dataset_config.get("songs_root", "")))
         self.include_unrated = tk.BooleanVar(value=False)
-        self.train_architecture = tk.StringVar(value="conformer-v2")
+        self.trust_imported_osz = tk.BooleanVar(value=False)
+        self.train_architecture = tk.StringVar(value="conformer-v3")
         self.train_output = tk.StringVar(
-            value=str(root / "models" / "modern" / "rhythm-conformer-v2")
+            value=str(root / "models" / "modern" / "rhythm-conformer-v3")
         )
+        self.placement_output = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
         self.epochs = tk.StringVar(value="50")
-        self.batch_size = tk.StringVar(value="16")
-        self.learning_rate = tk.StringVar(value="0.001")
+        self.batch_size = tk.StringVar(value="32")
+        self.learning_rate = tk.StringVar(value="0.0005")
         self.sequence_length = tk.StringVar(value="512")
-        self.context_radius = tk.StringVar(value="4")
+        self.context_radius = tk.StringVar(value="0")
         self.device = tk.StringVar(value="auto")
+        self.precision = tk.StringVar(value="auto")
+        self.xla = tk.StringVar(value="auto")
+        self.window_cache = tk.StringVar(value="auto")
+        self.balance_songs = tk.BooleanVar(value=True)
+        self.early_stopping = tk.StringVar(value="8")
+        self.weight_decay = tk.StringVar(value="0.0001")
         self.resume = tk.BooleanVar(value=False)
         self.review_count = tk.StringVar(value="5")
 
@@ -375,11 +389,17 @@ class OsumapperStudio:
         self._combo_row(
             settings, "Mode", self.mode, ("auto", "standard", "taiko", "catch", "mania")
         )
-        self._combo_row(settings, "Flow", self.flow_engine, ("auto", "deterministic", "legacy"))
+        self._combo_row(
+            settings,
+            "Flow",
+            self.flow_engine,
+            ("auto", "placement", "deterministic", "legacy"),
+        )
         self._combo_row(settings, "Rhythm", self.rhythm_engine, ("legacy", "modern"))
         self._entry_row(settings, "Seed", self.seed)
         self._entry_row(settings, "Difficulty", self.difficulty)
         self._entry_row(settings, "Modern model", self.modern_model)
+        self._entry_row(settings, "Placement model", self.placement_model)
         advanced = ttk.LabelFrame(settings, text="Advanced overrides", padding=9)
         advanced.pack(fill="x", pady=(8, 10))
         self._entry_row(advanced, "Threshold", self.threshold)
@@ -405,10 +425,12 @@ class OsumapperStudio:
     def _build_training_tab(self) -> None:
         columns = ttk.Panedwindow(self.training_tab, orient="horizontal")
         columns.pack(fill="both", expand=True)
-        dataset = ttk.Frame(columns, style="Card.TFrame", padding=16)
-        model = ttk.Frame(columns, style="Card.TFrame", padding=16)
-        columns.add(dataset, weight=1)
-        columns.add(model, weight=1)
+        dataset_shell = ttk.Frame(columns, style="Card.TFrame")
+        model_shell = ttk.Frame(columns, style="Card.TFrame")
+        dataset = self._scrollable_card(dataset_shell)
+        model = self._scrollable_card(model_shell)
+        columns.add(dataset_shell, weight=1)
+        columns.add(model_shell, weight=1)
 
         ttk.Label(dataset, text="Dataset workspace", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
@@ -417,20 +439,27 @@ class OsumapperStudio:
             style="CardText.TLabel",
             wraplength=410,
         ).pack(anchor="w", pady=(3, 14))
-        self._path_row(dataset, "Songs folder", self.songs_root, self._choose_songs_folder)
+        self._path_row(dataset, "Map source", self.songs_root, self._choose_songs_folder)
         self._path_row(dataset, "Data folder", self.data_root, self._choose_data_folder)
         ttk.Checkbutton(
             dataset,
             text="Include unrated maps (experimental; quality not guaranteed)",
             variable=self.include_unrated,
         ).pack(anchor="w", pady=(8, 12))
+        ttk.Checkbutton(
+            dataset,
+            text="Mark imported .osz maps GOOD (only for reviewed/trusted maps)",
+            variable=self.trust_imported_osz,
+        ).pack(anchor="w", pady=(0, 8))
         dataset_buttons = ttk.Frame(dataset, style="Card.TFrame")
         dataset_buttons.pack(fill="x")
         for text, action in (
             ("1  Scan", "scan"),
-            ("2  Stats", "stats"),
-            ("3  Split", "split"),
-            ("4  Features", "features"),
+            ("2  Import .osz folder", "import-osz"),
+            ("3  Stats", "stats"),
+            ("4  Split", "split"),
+            ("5  Features", "features"),
+            ("6  Window shards", "windows"),
         ):
             ttk.Button(
                 dataset_buttons,
@@ -450,16 +479,25 @@ class OsumapperStudio:
         ttk.Button(dataset, text="Generate held-out review packages", command=self._review).pack(
             fill="x", pady=3
         )
+        ttk.Button(dataset, text="Analyze placement in a .osu map", command=self._placement).pack(
+            fill="x", pady=3
+        )
 
         ttk.Label(model, text="Model training", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             model,
-            text="Conformer-v2 is isolated from the preserved Transformer-v1 baseline.",
+            text=(
+                "Conformer-v3 uses GPU mixed precision, cached window shards, "
+                "and balanced song weighting. Existing v1/v2 models remain unchanged."
+            ),
             style="CardText.TLabel",
             wraplength=410,
         ).pack(anchor="w", pady=(3, 14))
         self._combo_row(
-            model, "Architecture", self.train_architecture, ("conformer-v2", "transformer-v1")
+            model,
+            "Architecture",
+            self.train_architecture,
+            ("conformer-v3", "conformer-v2", "transformer-v1"),
         )
         self._path_row(model, "Model output", self.train_output, self._choose_train_output)
         self._entry_row(model, "Epochs", self.epochs)
@@ -468,14 +506,31 @@ class OsumapperStudio:
         self._entry_row(model, "Sequence length", self.sequence_length)
         self._entry_row(model, "Audio context", self.context_radius)
         self._combo_row(model, "Device", self.device, ("auto", "cpu", "gpu"))
+        performance = ttk.LabelFrame(model, text="GPU and data pipeline", padding=9)
+        performance.pack(fill="x", pady=(8, 8))
+        self._combo_row(
+            performance,
+            "Precision",
+            self.precision,
+            ("auto", "mixed-float16", "float32"),
+        )
+        self._combo_row(performance, "XLA", self.xla, ("auto", "on", "off"))
+        self._combo_row(performance, "Window cache", self.window_cache, ("auto", "rebuild", "off"))
+        self._entry_row(performance, "Early stop", self.early_stopping)
+        self._entry_row(performance, "Weight decay", self.weight_decay)
+        ttk.Checkbutton(
+            performance,
+            text="Balance songs (recommended)",
+            variable=self.balance_songs,
+        ).pack(anchor="w", pady=(4, 0))
         ttk.Checkbutton(model, text="Resume this exact run", variable=self.resume).pack(
             anchor="w", pady=(8, 12)
         )
         ttk.Label(
             model,
             text=(
-                "Do not resume the preserved Transformer-v1 baseline. "
-                "Start Conformer-v2 in its separate output folder."
+                "Resume only the exact same v3 output and split. "
+                "Use a new folder when changing architecture or data."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -486,6 +541,26 @@ class OsumapperStudio:
         self.train_button.pack(fill="x", pady=3)
         ttk.Button(
             model, text="Stop active process", style="Danger.TButton", command=self._stop
+        ).pack(fill="x", pady=3)
+        ttk.Separator(model).pack(fill="x", pady=14)
+        ttk.Label(model, text="Placement-v1", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            model,
+            text="Learn flow, object types, slider lengths, and combo changes after rhythm-v3.",
+            style="CardText.TLabel",
+            wraplength=410,
+        ).pack(anchor="w", pady=(3, 8))
+        self._entry_row(model, "Placement output", self.placement_output)
+        ttk.Button(
+            model,
+            text="Start Placement-v1 training",
+            style="Accent.TButton",
+            command=self._train_placement,
+        ).pack(fill="x", pady=3)
+        ttk.Button(
+            model,
+            text="Evaluate Placement-v1 on test songs",
+            command=self._evaluate_placement,
         ).pack(fill="x", pady=3)
 
     def _build_activity_tab(self) -> None:
@@ -517,6 +592,30 @@ class OsumapperStudio:
     @staticmethod
     def _section(parent: Any, text: str) -> None:
         ttk.Label(parent, text=text, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 7))
+
+    @staticmethod
+    def _scrollable_card(parent: Any) -> ttk.Frame:
+        canvas = tk.Canvas(
+            parent,
+            background=PANEL_ALT,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        content = ttk.Frame(canvas, style="Card.TFrame", padding=16)
+        window = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: canvas.configure(scrollregion=canvas.bbox("all")),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event: canvas.itemconfigure(window, width=event.width),
+        )
+        canvas.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        return content
 
     @staticmethod
     def _entry_row(parent: Any, label: str, variable: tk.StringVar) -> None:
@@ -561,7 +660,7 @@ class OsumapperStudio:
         self._choose_directory(self.output_dir, "Choose generated-package folder")
 
     def _choose_songs_folder(self) -> None:
-        self._choose_directory(self.songs_root, "Choose osu!stable Songs folder")
+        self._choose_directory(self.songs_root, "Choose Songs or downloaded .osz folder")
 
     def _choose_data_folder(self) -> None:
         self._choose_directory(self.data_root, "Choose training-data folder")
@@ -645,6 +744,13 @@ class OsumapperStudio:
             if self.modern_model.get().strip()
             else None
         )
+        placement_model = (
+            Path(self.placement_model.get()).expanduser().resolve()
+            if self.placement_model.get().strip()
+            else None
+        )
+        if self.flow_engine.get() == "placement" and self.rhythm_engine.get() != "modern":
+            raise ValueError("Placement-v1 requires the modern rhythm engine.")
         return GenerationOptions(
             preset=self.preset.get(),
             mode=self.mode.get(),
@@ -652,6 +758,7 @@ class OsumapperStudio:
             flow_engine=self.flow_engine.get(),
             rhythm_engine=self.rhythm_engine.get(),
             modern_model=model if self.rhythm_engine.get() == "modern" else None,
+            placement_model=(placement_model if self.flow_engine.get() == "placement" else None),
             threshold=threshold,
             density=density,
             difficulty=self.difficulty.get().strip() or None,
@@ -754,17 +861,31 @@ class OsumapperStudio:
             messagebox.showerror("Missing data folder", "Choose a training-data folder.")
             return
         command = self._base_command() + ["dataset", action]
-        if action == "scan":
+        if action in {"scan", "import-osz"}:
             songs = self.songs_root.get().strip()
             if not songs:
-                messagebox.showerror("Missing Songs folder", "Choose your osu!stable Songs folder.")
+                messagebox.showerror(
+                    "Missing source folder",
+                    "Choose an osu!stable Songs folder or a folder containing .osz packages.",
+                )
                 return
             command.append(songs)
         command.extend(("--data-root", data))
+        if action == "import-osz" and self.trust_imported_osz.get():
+            command.extend(("--rating", "good"))
         if action == "split":
             command.extend(("--seed", self.seed.get()))
             if self.include_unrated.get():
                 command.append("--include-unrated")
+        if action == "windows":
+            command.extend(
+                (
+                    "--sequence-length",
+                    self.sequence_length.get(),
+                    "--audio-context-radius",
+                    self.context_radius.get(),
+                )
+            )
         self._run_single(command, f"Dataset {action}")
 
     def _training_model_root(self) -> str:
@@ -780,6 +901,7 @@ class OsumapperStudio:
                 (self.batch_size.get(), "Batch size"),
                 (self.sequence_length.get(), "Sequence length"),
                 (self.context_radius.get(), "Audio context"),
+                (self.early_stopping.get(), "Early stopping"),
             ):
                 parsed = int(value)
                 if parsed <= 0 and label != "Audio context":
@@ -788,6 +910,8 @@ class OsumapperStudio:
                     raise ValueError("Audio context must be between 0 and 32.")
             if float(self.learning_rate.get()) <= 0:
                 raise ValueError("Learning rate must be positive.")
+            if float(self.weight_decay.get()) < 0:
+                raise ValueError("Weight decay cannot be negative.")
             output = self._training_model_root()
         except ValueError as exc:
             messagebox.showerror("Invalid training settings", str(exc))
@@ -813,12 +937,96 @@ class OsumapperStudio:
             self.context_radius.get(),
             "--device",
             self.device.get(),
+            "--precision",
+            self.precision.get(),
+            "--xla",
+            self.xla.get(),
+            "--window-cache",
+            self.window_cache.get(),
+            "--early-stopping-patience",
+            self.early_stopping.get(),
+            "--weight-decay",
+            self.weight_decay.get(),
             "--seed",
             self.seed.get(),
         ]
         if self.resume.get():
             command.append("--resume")
+        if not self.balance_songs.get():
+            command.append("--no-balance-songs")
         self._run_single(command, f"Train {self.train_architecture.get()}")
+
+    def _placement(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Choose an osu!standard beatmap",
+            filetypes=(("osu! beatmap", "*.osu"),),
+        )
+        if not selected:
+            return
+        output = Path(self.output_dir.get()) / f"{Path(selected).stem}-placement-analysis.json"
+        command = self._base_command() + [
+            "placement",
+            "analyze",
+            selected,
+            "--output",
+            str(output),
+        ]
+        self._run_single(command, "Placement analysis")
+
+    def _train_placement(self) -> None:
+        output = self.placement_output.get().strip()
+        if not output:
+            messagebox.showerror("Missing placement output", "Choose a Placement-v1 output folder.")
+            return
+        command = self._base_command() + [
+            "train",
+            "placement",
+            "--data-root",
+            self.data_root.get(),
+            "--output",
+            output,
+            "--epochs",
+            self.epochs.get(),
+            "--batch-size",
+            self.batch_size.get(),
+            "--learning-rate",
+            self.learning_rate.get(),
+            "--sequence-length",
+            "256",
+            "--device",
+            self.device.get(),
+            "--precision",
+            self.precision.get(),
+            "--xla",
+            self.xla.get(),
+            "--early-stopping-patience",
+            self.early_stopping.get(),
+            "--weight-decay",
+            self.weight_decay.get(),
+            "--seed",
+            self.seed.get(),
+        ]
+        if self.resume.get():
+            command.append("--resume")
+        if not self.balance_songs.get():
+            command.append("--no-balance-songs")
+        self._run_single(command, "Train Placement-v1")
+
+    def _evaluate_placement(self) -> None:
+        model = self.placement_output.get().strip()
+        if not model:
+            messagebox.showerror("Missing placement model", "Choose a Placement-v1 folder.")
+            return
+        command = self._base_command() + [
+            "train",
+            "evaluate",
+            "placement",
+            "--data-root",
+            self.data_root.get(),
+            "--model",
+            model,
+        ]
+        self._run_single(command, "Evaluate Placement-v1")
 
     def _calibrate(self) -> None:
         try:

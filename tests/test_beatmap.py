@@ -73,6 +73,21 @@ class BeatmapTests(unittest.TestCase):
         updated = document.set_value("Metadata", "TitleUnicode", "星の歌")
         self.assertEqual(updated.value("Metadata", "TitleUnicode"), "星の歌")
 
+    def test_new_combo_flag_is_preserved_during_serialization(self) -> None:
+        circle = serialize_hit_object({"x": 256, "y": 192, "time": 500, "type": 5})
+        slider = serialize_hit_object(
+            {
+                "x": 256,
+                "y": 192,
+                "time": 1_000,
+                "type": 6,
+                "sliderGenerator": {"endpoint": [384, 192], "len": 128},
+            }
+        )
+
+        self.assertEqual(circle.split(",")[3], "5")
+        self.assertEqual(slider.split(",")[3], "6")
+
 
 if __name__ == "__main__":
     unittest.main()

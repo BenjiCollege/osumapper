@@ -46,6 +46,7 @@ class GenerationConfig:
     flow_engine: str = "auto"
     rhythm_engine: str = "legacy"
     modern_model: Path | None = None
+    placement_model: Path | None = None
     rhythm_threshold: float | None = None
     target_density: float | None = None
 
@@ -55,7 +56,6 @@ def configure_determinism(seed: int) -> None:
     os.environ.setdefault("PYTHONHASHSEED", str(seed))
     os.environ.setdefault("TF_DETERMINISTIC_OPS", "1")
     os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
-    os.environ.setdefault("TF_USE_LEGACY_KERAS", "1")
     random.seed(seed)
 
     try:

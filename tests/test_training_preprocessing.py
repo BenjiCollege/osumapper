@@ -11,7 +11,13 @@ from pathlib import Path
 import numpy as np
 
 from osumapper.training.beatmaps import parse_standard_beatmap
-from osumapper.training.config import AudioFeatureConfig, DatasetPaths, GridConfig, QualityConfig
+from osumapper.training.config import (
+    AudioFeatureConfig,
+    DatasetPaths,
+    GridConfig,
+    QualityConfig,
+    prediction_threshold,
+)
 from osumapper.training.dataset import rate_map, scan_dataset
 from osumapper.training.features import (
     extract_audio_features,
@@ -48,6 +54,22 @@ def _write_tone(path: Path, duration_seconds: float = 2.0, sample_rate: int = 22
 
 
 class TrainingPreprocessingTests(unittest.TestCase):
+    def test_density_aware_threshold_prefers_matching_validation_band(self) -> None:
+        config = {
+            "training": {"prediction_threshold": 0.5},
+            "calibration": {
+                "threshold": 0.8,
+                "density_bands": [
+                    {"minimum_density": 0.0, "maximum_density": 1.5, "threshold": 0.7},
+                    {"minimum_density": 1.5, "maximum_density": 3.0, "threshold": 0.9},
+                ],
+            },
+        }
+
+        self.assertEqual(prediction_threshold(config, target_density=2.0), 0.9)
+        self.assertEqual(prediction_threshold(config, target_density=4.0), 0.8)
+        self.assertEqual(prediction_threshold(config, 0.6, target_density=2.0), 0.6)
+
     def test_song_level_split_is_deterministic_and_has_no_mapset_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

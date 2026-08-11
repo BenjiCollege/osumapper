@@ -32,14 +32,28 @@ from osumapper.training.analysis import analyze_map
 from osumapper.training.calibration import calibrate_threshold
 from osumapper.training.config import (
     AudioFeatureConfig,
+    GridConfig,
     QualityConfig,
     RhythmTrainingConfig,
 )
-from osumapper.training.dataset import dataset_statistics, rate_map, scan_dataset
+from osumapper.training.dataset import (
+    dataset_statistics,
+    import_osz_dataset,
+    rate_map,
+    rate_maps,
+    scan_dataset,
+)
 from osumapper.training.evaluation import evaluate_rhythm
 from osumapper.training.features import extract_dataset_features
+from osumapper.training.loader import make_tf_dataset
+from osumapper.training.placement import analyze_placement
+from osumapper.training.placement_learning import (
+    PlacementTrainingConfig,
+    evaluate_placement,
+    train_placement,
+)
 from osumapper.training.review import generate_review_packages
-from osumapper.training.splits import split_dataset
+from osumapper.training.splits import load_split, split_dataset
 from osumapper.training.trainer import train_rhythm
 
 
@@ -82,11 +96,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     generate.add_argument("--seed", type=int, default=2026)
     generate.add_argument(
-        "--flow-engine", choices=("auto", "legacy", "deterministic"), default="auto"
+        "--flow-engine",
+        choices=("auto", "legacy", "deterministic", "placement"),
+        default="auto",
     )
     generate.add_argument("--rhythm-engine", choices=("legacy", "modern"), default="legacy")
     generate.add_argument(
         "--modern-model", type=Path, help="modern rhythm model directory or .keras file"
+    )
+    generate.add_argument(
+        "--placement-model", type=Path, help="Placement-v1 model directory or .keras file"
     )
     generate.add_argument("--rhythm-threshold", type=float, help="modern hit-probability threshold")
     generate.add_argument(
@@ -118,6 +137,7 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_scan.add_argument("--min-bpm", type=float, default=20.0)
     dataset_scan.add_argument("--max-bpm", type=float, default=1_000.0)
     dataset_scan.add_argument("--allow-converted", action="store_true")
+    dataset_scan.add_argument("--append", action="store_true")
 
     dataset_stats = dataset_sub.add_parser("stats", help="summarize the local dataset")
     dataset_stats.add_argument("--data-root", type=Path)
@@ -126,6 +146,24 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_rate.add_argument("map", type=Path)
     dataset_rate.add_argument("rating", choices=("good", "bad", "ignore"))
     dataset_rate.add_argument("--data-root", type=Path)
+
+    dataset_rate_folder = dataset_sub.add_parser(
+        "rate-folder", help="rate every .osu file under a deliberately selected folder"
+    )
+    dataset_rate_folder.add_argument("folder", type=Path)
+    dataset_rate_folder.add_argument("rating", choices=("good", "bad", "ignore"))
+    dataset_rate_folder.add_argument("--data-root", type=Path)
+
+    dataset_import = dataset_sub.add_parser(
+        "import-osz", help="safely stage .osz packages and append them to the dataset"
+    )
+    dataset_import.add_argument("source", type=Path)
+    dataset_import.add_argument("--data-root", type=Path)
+    dataset_import.add_argument(
+        "--rating",
+        choices=("good", "bad", "ignore"),
+        help="apply only when you have reviewed/trust every imported map",
+    )
 
     dataset_split = dataset_sub.add_parser(
         "split", help="create deterministic song-level train/validation/test splits"
@@ -147,6 +185,14 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_features.add_argument("--n-mels", type=int, default=128)
     dataset_features.add_argument("--force", action="store_true")
 
+    dataset_windows = dataset_sub.add_parser(
+        "windows", help="precompute deterministic float16 training-window shards"
+    )
+    dataset_windows.add_argument("--data-root", type=Path)
+    dataset_windows.add_argument("--sequence-length", type=int, default=512)
+    dataset_windows.add_argument("--audio-context-radius", type=int, default=0)
+    dataset_windows.add_argument("--rebuild", action="store_true")
+
     train = subparsers.add_parser("train", help="train or evaluate modern local models")
     train_sub = train.add_subparsers(dest="train_command", required=True)
     train_rhythm_parser = train_sub.add_parser("rhythm", help="train the modern rhythm model")
@@ -157,24 +203,74 @@ def _build_parser() -> argparse.ArgumentParser:
     train_rhythm_parser.add_argument("--seed", type=int, default=2026)
     train_rhythm_parser.add_argument("--resume", action="store_true")
     train_rhythm_parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto")
+    train_rhythm_parser.add_argument(
+        "--precision",
+        choices=("auto", "float32", "mixed-float16"),
+        default="auto",
+        help="numeric policy (auto uses mixed float16 on an NVIDIA GPU)",
+    )
+    train_rhythm_parser.add_argument(
+        "--xla", choices=("auto", "on", "off"), default="auto", help="XLA compilation mode"
+    )
+    train_rhythm_parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=8,
+        help="stop after this many epochs without validation PR-AUC improvement; 0 disables",
+    )
+    train_rhythm_parser.add_argument("--lr-patience", type=int, default=3)
+    train_rhythm_parser.add_argument("--lr-factor", type=float, default=0.5)
+    train_rhythm_parser.add_argument("--min-learning-rate", type=float, default=1e-5)
+    train_rhythm_parser.add_argument("--weight-decay", type=float, default=1e-4)
+    train_rhythm_parser.add_argument(
+        "--window-cache",
+        choices=("auto", "off", "rebuild"),
+        default="auto",
+        help="reuse, disable, or rebuild deterministic float16 training shards",
+    )
+    train_rhythm_parser.add_argument(
+        "--no-balance-songs",
+        action="store_true",
+        help="disable inverse-window song weighting",
+    )
     train_rhythm_parser.add_argument("--output", type=Path)
     train_rhythm_parser.add_argument("--sequence-length", type=int, default=256)
     train_rhythm_parser.add_argument("--threshold", type=float, default=0.5)
     train_rhythm_parser.add_argument(
         "--architecture",
-        choices=("transformer-v1", "conformer-v2"),
-        default="transformer-v1",
+        choices=("transformer-v1", "conformer-v2", "conformer-v3"),
+        default="conformer-v3",
     )
     train_rhythm_parser.add_argument(
         "--audio-context-radius",
         type=int,
-        help="feature frames on each side (default: 0 for v1, 4 for Conformer-v2)",
+        help="feature frames on each side (default: 4 for v2, 0 for v1/v3)",
     )
+
+    train_placement_parser = train_sub.add_parser(
+        "placement", help="train learned standard-mode flow and object-type placement"
+    )
+    train_placement_parser.add_argument("--data-root", type=Path)
+    train_placement_parser.add_argument("--output", type=Path)
+    train_placement_parser.add_argument("--epochs", type=int, default=50)
+    train_placement_parser.add_argument("--batch-size", type=int, default=32)
+    train_placement_parser.add_argument("--learning-rate", type=float, default=5e-4)
+    train_placement_parser.add_argument("--sequence-length", type=int, default=256)
+    train_placement_parser.add_argument("--seed", type=int, default=2026)
+    train_placement_parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto")
+    train_placement_parser.add_argument(
+        "--precision", choices=("auto", "float32", "mixed-float16"), default="auto"
+    )
+    train_placement_parser.add_argument("--xla", choices=("auto", "on", "off"), default="auto")
+    train_placement_parser.add_argument("--early-stopping-patience", type=int, default=8)
+    train_placement_parser.add_argument("--weight-decay", type=float, default=1e-4)
+    train_placement_parser.add_argument("--no-balance-songs", action="store_true")
+    train_placement_parser.add_argument("--resume", action="store_true")
 
     train_evaluate = train_sub.add_parser(
         "evaluate", help="evaluate a model against held-out test songs only"
     )
-    train_evaluate.add_argument("model_kind", choices=("rhythm",))
+    train_evaluate.add_argument("model_kind", choices=("rhythm", "placement"))
     train_evaluate.add_argument("--data-root", type=Path)
     train_evaluate.add_argument("--model", type=Path)
     train_evaluate.add_argument("--threshold", type=float)
@@ -209,6 +305,14 @@ def _build_parser() -> argparse.ArgumentParser:
     analyze.add_argument("--threshold", type=float)
     analyze.add_argument("--output", type=Path)
     analyze.add_argument("--format", choices=("json", "csv", "both"), default="json")
+
+    placement = subparsers.add_parser(
+        "placement", help="inspect standard-map flow, bounds, spacing, and playability heuristics"
+    )
+    placement_sub = placement.add_subparsers(dest="placement_command", required=True)
+    placement_analyze = placement_sub.add_parser("analyze", help="analyze one .osu map")
+    placement_analyze.add_argument("map", type=Path)
+    placement_analyze.add_argument("--output", type=Path)
 
     models = subparsers.add_parser("models", help="migrate or verify legacy rhythm models")
     models_sub = models.add_subparsers(dest="models_command", required=True)
@@ -251,6 +355,7 @@ def _generate(args: argparse.Namespace) -> int:
             flow_engine=args.flow_engine,
             rhythm_engine=args.rhythm_engine,
             modern_model=args.modern_model,
+            placement_model=args.placement_model,
             rhythm_threshold=args.rhythm_threshold,
             target_density=args.target_density,
             audio=args.audio,
@@ -351,6 +456,7 @@ def _dataset(args: argparse.Namespace) -> int:
             args.songs_root,
             dataset_root=args.data_root,
             quality=quality,
+            append=args.append,
         )
         print(json.dumps(result.as_dict(), indent=2))
         return 0
@@ -359,6 +465,22 @@ def _dataset(args: argparse.Namespace) -> int:
         return 0
     if args.dataset_command == "rate":
         result = rate_map(args.map, args.rating, dataset_root=args.data_root)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.dataset_command == "rate-folder":
+        folder = args.folder.expanduser().resolve()
+        if not folder.is_dir():
+            raise OsumapperError(f"Folder does not exist: {folder}")
+        maps = sorted(folder.rglob("*.osu"), key=lambda path: str(path).casefold())
+        result = rate_maps(maps, args.rating, dataset_root=args.data_root)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.dataset_command == "import-osz":
+        result = import_osz_dataset(
+            args.source,
+            dataset_root=args.data_root,
+            rating=args.rating,
+        )
         print(json.dumps(result, indent=2))
         return 0
     if args.dataset_command == "split":
@@ -387,6 +509,33 @@ def _dataset(args: argparse.Namespace) -> int:
         )
         print(json.dumps(result.as_dict(), indent=2))
         return 0
+    if args.dataset_command == "windows":
+        if args.sequence_length <= 0 or not 0 <= args.audio_context_radius <= 32:
+            raise OsumapperError("Sequence length must be positive and context must be 0-32.")
+        summaries: dict[str, Any] = {}
+        for split in ("train", "validation", "test"):
+            rows = load_split(split, dataset_root=args.data_root)
+            if not rows:
+                continue
+            _, summary = make_tf_dataset(
+                rows,
+                dataset_root=args.data_root,
+                grid_config=GridConfig(sequence_length=args.sequence_length),
+                batch_size=1,
+                seed=2026,
+                shuffle=False,
+                audio_context_radius=args.audio_context_radius,
+                cache_split=split,
+                cache_mode="rebuild" if args.rebuild else "auto",
+                balance_songs=split == "train",
+            )
+            summaries[split] = {
+                "windows": summary.windows,
+                "songs": summary.songs,
+                "cache": summary.cache_path,
+            }
+        print(json.dumps(summaries, indent=2))
+        return 0
     raise OsumapperError(f"Unhandled dataset command: {args.dataset_command}")
 
 
@@ -413,6 +562,15 @@ def _train(args: argparse.Namespace) -> int:
             prediction_threshold=args.threshold,
             architecture=args.architecture,
             audio_context_radius=context_radius,
+            precision=args.precision,
+            xla=args.xla,
+            early_stopping_patience=args.early_stopping_patience,
+            learning_rate_patience=args.lr_patience,
+            learning_rate_factor=args.lr_factor,
+            minimum_learning_rate=args.min_learning_rate,
+            weight_decay=args.weight_decay,
+            window_cache=args.window_cache,
+            balance_songs=not args.no_balance_songs,
         )
         result = train_rhythm(
             dataset_root=args.data_root,
@@ -433,11 +591,49 @@ def _train(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if args.train_command == "placement":
+        if (
+            args.epochs <= 0
+            or args.batch_size <= 0
+            or args.learning_rate <= 0
+            or args.sequence_length <= 0
+        ):
+            raise OsumapperError(
+                "Placement epochs, batch size, rate, and sequence must be positive."
+            )
+        report = train_placement(
+            dataset_root=args.data_root,
+            output=args.output,
+            config=PlacementTrainingConfig(
+                epochs=args.epochs,
+                batch_size=args.batch_size,
+                learning_rate=args.learning_rate,
+                sequence_length=args.sequence_length,
+                seed=args.seed,
+                device=args.device,
+                precision=args.precision,
+                xla=args.xla,
+                early_stopping_patience=args.early_stopping_patience,
+                weight_decay=args.weight_decay,
+                balance_songs=not args.no_balance_songs,
+            ),
+            resume=args.resume,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
     if args.train_command == "evaluate" and args.model_kind == "rhythm":
         report = evaluate_rhythm(
             dataset_root=args.data_root,
             model_root=args.model,
             threshold=args.threshold,
+            output=args.output,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    if args.train_command == "evaluate" and args.model_kind == "placement":
+        report = evaluate_placement(
+            dataset_root=args.data_root,
+            model_root=args.model,
             output=args.output,
         )
         print(json.dumps(report, indent=2))
@@ -497,6 +693,9 @@ def main(argv: list[str] | None = None) -> int:
             return _train(args)
         if args.command == "analyze":
             return _analyze(args)
+        if args.command == "placement" and args.placement_command == "analyze":
+            print(json.dumps(analyze_placement(args.map, output=args.output), indent=2))
+            return 0
         if args.command == "models":
             return _models(args)
         if args.command == "stable-scan":

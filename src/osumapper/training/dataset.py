@@ -22,6 +22,7 @@ from osumapper.training.beatmaps import (
 )
 from osumapper.training.config import DatasetPaths, QualityConfig
 from osumapper.training.storage import read_json, read_parquet, write_json, write_parquet
+from osumapper.workspace import safe_extract_osz
 
 Progress = Callable[[str], None]
 RATINGS = {"good", "bad", "ignore"}
@@ -212,6 +213,7 @@ def scan_dataset(
     dataset_root: Path | None = None,
     quality: QualityConfig | None = None,
     progress: Progress = print,
+    append: bool = False,
 ) -> ScanSummary:
     root = songs_root.expanduser().resolve()
     if not root.is_dir():
@@ -270,6 +272,12 @@ def scan_dataset(
         if index % 250 == 0:
             progress(f"Scanned {index}/{len(discovered)} maps")
 
+    previous_config = read_json(paths.config, default={}) if append else {}
+    if append and paths.dataset.is_file():
+        existing = read_parquet(paths.dataset)
+        combined = {str(row["map_sha256"]): row for row in existing}
+        combined.update({str(row["map_sha256"]): row for row in rows})
+        rows = list(combined.values())
     disambiguated = _disambiguate_multi_audio_song_ids(rows)
     if disambiguated:
         progress(
@@ -297,6 +305,17 @@ def scan_dataset(
         {
             "schema_version": DATASET_SCHEMA_VERSION,
             "songs_root": str(root),
+            "songs_roots": sorted(
+                {
+                    str(root),
+                    *[str(value) for value in previous_config.get("songs_roots", [])],
+                    *(
+                        [str(previous_config["songs_root"])]
+                        if previous_config.get("songs_root")
+                        else []
+                    ),
+                }
+            ),
             "quality": config.as_dict(),
             "last_scan_utc": datetime.now(UTC).isoformat(),
             "summary": summary.as_dict(),
@@ -310,38 +329,124 @@ def scan_dataset(
 
 
 def rate_map(map_path: Path, rating: str, *, dataset_root: Path | None = None) -> dict[str, Any]:
+    result = rate_maps([map_path], rating, dataset_root=dataset_root)
+    return result["maps"][0]
+
+
+def rate_maps(
+    map_paths: list[Path], rating: str, *, dataset_root: Path | None = None
+) -> dict[str, Any]:
     normalized = rating.casefold()
     if normalized not in RATINGS:
         raise InputError(f"Rating must be one of: {', '.join(sorted(RATINGS))}")
-    path = map_path.expanduser().resolve()
-    if not path.is_file():
-        raise InputError(f"Beatmap does not exist: {path}")
+    resolved = [path.expanduser().resolve() for path in map_paths]
+    missing = next((path for path in resolved if not path.is_file()), None)
+    if missing is not None:
+        raise InputError(f"Beatmap does not exist: {missing}")
+    if not resolved:
+        raise InputError("No .osu beatmaps were selected for rating.")
     paths = DatasetPaths.at(dataset_root)
     paths.create()
-    map_sha = file_sha256(path)
     document = _ratings_document(paths)
-    record = {
-        "rating": normalized,
-        "path": str(path),
-        "updated_utc": datetime.now(UTC).isoformat(),
-    }
-    document["ratings"][map_sha] = record
-    document["ratings"][str(path).casefold()] = record
+    timestamp = datetime.now(UTC).isoformat()
+    results: list[dict[str, Any]] = []
+    identities: dict[str, Path] = {}
+    for path in resolved:
+        map_sha = file_sha256(path)
+        identities[map_sha] = path
+        record = {"rating": normalized, "path": str(path), "updated_utc": timestamp}
+        document["ratings"][map_sha] = record
+        document["ratings"][str(path).casefold()] = record
+        results.append(
+            {
+                "path": str(path),
+                "sha256": map_sha,
+                "rating": normalized,
+                "rows_updated": 0,
+            }
+        )
     write_json(paths.ratings, document)
 
     updated = 0
     if paths.dataset.is_file():
         rows = read_parquet(paths.dataset)
+        result_lookup = {str(result["sha256"]): result for result in results}
         for row in rows:
-            if row["map_sha256"] != map_sha:
+            map_sha = str(row["map_sha256"])
+            if map_sha not in identities:
                 continue
             row["rating"] = normalized
             status, eligible = _quality_state(normalized, list(row["quality_reasons"] or []))
             row["quality_status"] = status
             row["eligible"] = eligible
             updated += 1
+            result_lookup[map_sha]["rows_updated"] += 1
         write_parquet(rows, paths.dataset)
-    return {"path": str(path), "sha256": map_sha, "rating": normalized, "rows_updated": updated}
+    return {
+        "rating": normalized,
+        "selected": len(resolved),
+        "rows_updated": updated,
+        "maps": results,
+    }
+
+
+def import_osz_dataset(
+    source: Path,
+    *,
+    dataset_root: Path | None = None,
+    rating: str | None = None,
+    quality: QualityConfig | None = None,
+    progress: Progress = print,
+) -> dict[str, Any]:
+    """Safely stage one package or a folder of packages and append them to the dataset."""
+    selected = source.expanduser().resolve()
+    if selected.is_file() and selected.suffix.casefold() == ".osz":
+        packages = [selected]
+    elif selected.is_dir():
+        packages = sorted(selected.rglob("*.osz"), key=lambda path: str(path).casefold())
+    else:
+        raise InputError(f"Expected an .osz package or folder containing packages: {selected}")
+    if not packages:
+        raise InputError(f"No .osz packages were found under {selected}")
+    paths = DatasetPaths.at(dataset_root)
+    paths.create()
+    imported_root = paths.root / "imported_osz"
+    imported_root.mkdir(parents=True, exist_ok=True)
+    extracted = 0
+    reused = 0
+    maps: list[Path] = []
+    for index, package in enumerate(packages, start=1):
+        package_hash = file_sha256(package)
+        destination = imported_root / package_hash[:20]
+        if destination.is_dir() and any(destination.rglob("*.osu")):
+            reused += 1
+        else:
+            with tempfile.TemporaryDirectory(prefix=".osumapper-osz-", dir=imported_root) as name:
+                temporary = Path(name)
+                safe_extract_osz(package, temporary)
+                os.replace(temporary, destination)
+            extracted += 1
+        maps.extend(destination.rglob("*.osu"))
+        if index % 25 == 0:
+            progress(f"Imported {index}/{len(packages)} packages")
+    if rating is not None:
+        rate_maps(sorted(set(maps)), rating, dataset_root=paths.root)
+    summary = scan_dataset(
+        imported_root,
+        dataset_root=paths.root,
+        quality=quality,
+        progress=progress,
+        append=True,
+    )
+    return {
+        "packages": len(packages),
+        "extracted": extracted,
+        "reused": reused,
+        "maps_in_packages": len(set(maps)),
+        "rating": rating or "unrated",
+        "dataset": summary.as_dict(),
+        "import_root": str(imported_root),
+    }
 
 
 def _distribution(values: list[float]) -> dict[str, float | int | None]:

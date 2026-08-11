@@ -26,6 +26,7 @@ class GenerationRequest:
     flow_engine: str = "auto"
     rhythm_engine: str = "legacy"
     modern_model: Path | None = None
+    placement_model: Path | None = None
     rhythm_threshold: float | None = None
     target_density: float | None = None
     audio: Path | None = None
@@ -44,6 +45,8 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         raise InputError("Rhythm threshold must be between 0 and 1.")
     if request.target_density is not None and not 0 < request.target_density <= 20:
         raise InputError("Target density must be greater than 0 and at most 20.")
+    if request.flow_engine == "placement" and request.rhythm_engine != "modern":
+        raise InputError("Placement-v1 requires --rhythm-engine modern.")
     config = GenerationConfig(
         preset=request.preset,
         mode=request.mode,
@@ -54,6 +57,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         flow_engine=request.flow_engine,
         rhythm_engine=request.rhythm_engine,
         modern_model=request.modern_model,
+        placement_model=request.placement_model,
         rhythm_threshold=request.rhythm_threshold,
         target_density=request.target_density,
     )

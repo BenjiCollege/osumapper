@@ -27,6 +27,8 @@ def build_rhythm_model(
     attention_heads: int | None = None,
     dropout: float = 0.15,
     positive_weight: float = 1.0,
+    jit_compile: bool | str = "auto",
+    weight_decay: float = 0.0,
 ) -> Any:
     if audio_dimension <= 0 or grid_dimension <= 0 or sequence_length <= 0:
         raise InputError("Model dimensions must be positive.")
@@ -35,14 +37,22 @@ def build_rhythm_model(
         "conv_audio_encoder_transformer": "transformer-v1",
         "transformer-v1": "transformer-v1",
         "conformer-v2": "conformer-v2",
+        "conformer-v3": "conformer-v3",
     }
     try:
         selected_architecture = aliases[architecture.casefold()]
     except KeyError as exc:
-        raise InputError("Architecture must be transformer-v1 or conformer-v2.") from exc
-    dimension = model_dimension or (192 if selected_architecture == "conformer-v2" else 128)
-    blocks = transformer_blocks or (4 if selected_architecture == "conformer-v2" else 3)
-    heads = attention_heads or (6 if selected_architecture == "conformer-v2" else 4)
+        raise InputError(
+            "Architecture must be transformer-v1, conformer-v2, or conformer-v3."
+        ) from exc
+    conformer = selected_architecture.startswith("conformer-")
+    dimension = model_dimension or (
+        160 if selected_architecture == "conformer-v3" else 192 if conformer else 128
+    )
+    blocks = transformer_blocks or (4 if conformer else 3)
+    heads = attention_heads or (
+        5 if selected_architecture == "conformer-v3" else 6 if conformer else 4
+    )
     if dimension % heads:
         raise InputError("Model dimension must be divisible by attention heads.")
     audio_input = keras.Input(
@@ -64,6 +74,15 @@ def build_rhythm_model(
     difficulty = keras.layers.RepeatVector(sequence_length, name="difficulty_broadcast")(difficulty)
     combined = keras.layers.Concatenate(name="feature_fusion")([audio, grid, difficulty])
     sequence = keras.layers.Dense(dimension, name="fusion_projection")(combined)
+    attention_mask = None
+    if selected_architecture == "conformer-v3":
+        # The musical grid is non-zero for every real candidate and zero for
+        # padded positions, so this prevents padding from affecting attention.
+        valid_steps = keras.ops.any(keras.ops.not_equal(grid_input, 0.0), axis=-1)
+        attention_mask = keras.ops.logical_and(
+            keras.ops.expand_dims(valid_steps, axis=1),
+            keras.ops.expand_dims(valid_steps, axis=2),
+        )
 
     if selected_architecture == "transformer-v1":
         for block in range(blocks):
@@ -113,7 +132,7 @@ def build_rhythm_model(
                 key_dim=dimension // heads,
                 dropout=dropout,
                 name=f"conformer_attention_{block}",
-            )(attention, attention)
+            )(attention, attention, attention_mask=attention_mask)
             attention = keras.layers.Dropout(dropout, name=f"conformer_attention_dropout_{block}")(
                 attention
             )
@@ -124,20 +143,41 @@ def build_rhythm_model(
             convolution = keras.layers.LayerNormalization(
                 name=f"conformer_convolution_norm_{block}"
             )(sequence)
-            convolution = keras.layers.Dense(
-                dimension * 2,
-                activation="swish",
-                name=f"conformer_convolution_expand_{block}",
-            )(convolution)
+            if selected_architecture == "conformer-v3":
+                convolution_value = keras.layers.Dense(
+                    dimension,
+                    name=f"conformer_convolution_value_{block}",
+                )(convolution)
+                convolution_gate = keras.layers.Dense(
+                    dimension,
+                    activation="sigmoid",
+                    name=f"conformer_convolution_gate_{block}",
+                )(convolution)
+                convolution = keras.layers.Multiply(name=f"conformer_convolution_glu_{block}")(
+                    [convolution_value, convolution_gate]
+                )
+                convolution_channels = dimension
+            else:
+                convolution = keras.layers.Dense(
+                    dimension * 2,
+                    activation="swish",
+                    name=f"conformer_convolution_expand_{block}",
+                )(convolution)
+                convolution_channels = dimension * 2
             convolution = keras.layers.SeparableConv1D(
-                dimension * 2,
+                convolution_channels,
                 kernel_size=31,
                 padding="same",
                 name=f"conformer_depthwise_convolution_{block}",
             )(convolution)
-            convolution = keras.layers.BatchNormalization(
-                name=f"conformer_convolution_batch_norm_{block}"
-            )(convolution)
+            normalization = (
+                keras.layers.LayerNormalization
+                if selected_architecture == "conformer-v3"
+                else keras.layers.BatchNormalization
+            )
+            convolution = normalization(name=f"conformer_convolution_batch_norm_{block}")(
+                convolution
+            )
             convolution = keras.layers.Activation(
                 "swish", name=f"conformer_convolution_activation_{block}"
             )(convolution)
@@ -169,7 +209,11 @@ def build_rhythm_model(
             )
 
     sequence = keras.layers.LayerNormalization(name="output_normalization")(sequence)
-    output = keras.layers.Dense(1, activation="sigmoid", name="hit_probability")(sequence)
+    # Mixed precision keeps the expensive encoder on Tensor Cores, while a
+    # float32 probability head avoids underflow in calibration and weighted BCE.
+    output = keras.layers.Dense(1, activation="sigmoid", dtype="float32", name="hit_probability")(
+        sequence
+    )
     model = keras.Model(
         inputs={
             "audio_features": audio_input,
@@ -178,12 +222,19 @@ def build_rhythm_model(
         },
         outputs=output,
         name=(
-            "osumapper_rhythm_conformer_v2"
-            if selected_architecture == "conformer-v2"
+            f"osumapper_rhythm_{selected_architecture.replace('-', '_')}"
+            if conformer
             else "osumapper_modern_rhythm_v1"
         ),
     )
-    compile_rhythm_model(model, learning_rate=learning_rate, positive_weight=positive_weight)
+    compile_rhythm_model(
+        model,
+        learning_rate=learning_rate,
+        positive_weight=positive_weight,
+        jit_compile=jit_compile,
+        optimizer_name="adamw" if selected_architecture == "conformer-v3" else "adam",
+        weight_decay=weight_decay,
+    )
     return model
 
 
@@ -254,10 +305,26 @@ def _weighted_binary_crossentropy(keras: Any, positive_weight: float) -> Any:
     return WeightedBinaryCrossentropy(positive_weight=positive_weight)
 
 
-def compile_rhythm_model(model: Any, *, learning_rate: float, positive_weight: float = 1.0) -> None:
+def compile_rhythm_model(
+    model: Any,
+    *,
+    learning_rate: float,
+    positive_weight: float = 1.0,
+    jit_compile: bool | str = "auto",
+    optimizer_name: str = "adam",
+    weight_decay: float = 0.0,
+) -> None:
     keras = _require_keras()
+    if optimizer_name == "adamw":
+        optimizer = keras.optimizers.AdamW(
+            learning_rate=learning_rate,
+            weight_decay=weight_decay,
+            clipnorm=1.0,
+        )
+    else:
+        optimizer = keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=optimizer,
         loss=_weighted_binary_crossentropy(keras, positive_weight),
         metrics=[
             keras.metrics.Precision(name="precision", thresholds=0.5),
@@ -265,6 +332,7 @@ def compile_rhythm_model(model: Any, *, learning_rate: float, positive_weight: f
             _sequence_f1_metric(keras),
             keras.metrics.AUC(name="pr_auc", curve="PR"),
         ],
+        jit_compile=jit_compile,
     )
 
 

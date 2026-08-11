@@ -33,9 +33,14 @@ baseline and compatibility policy.
   actionable errors.
 - Fourteen migrated `.keras` rhythm models with deterministic prediction-parity
   manifests.
-- An opt-in local osu!standard dataset, feature extraction, Transformer-v1 and
-  Conformer-v2 training, validation-only calibration, held-out evaluation, and
-  deterministic human-review packages.
+- An opt-in local osu!standard dataset, safe curated `.osz` ingestion,
+  Transformer-v1, Conformer-v2, and faster Conformer-v3 training,
+  validation-only density calibration, held-out evaluation, and deterministic
+  human-review packages.
+- Mixed-precision RTX training, optional XLA, float16 window shards, per-song
+  balancing, AdamW, learning-rate reduction, and early stopping.
+- A Placement-v1 learner for flow, object types, slider lengths, and combo
+  changes, plus a standalone placement/playability analyzer.
 - Representative fixtures, golden-output tests, safe-archive tests, and
   cross-ruleset smoke coverage.
 
@@ -157,9 +162,11 @@ model, validation-calibrated threshold override, density, difficulty, BPM,
 offset, and mania keys. **Import each completed package into osu!lazer** opens
 every successful `.osz` as it finishes.
 
-The **Training lab** tab provides the same scan, statistics, split, feature,
-training, calibration, held-out evaluation, and review-package commands described
-below. The **Activity** tab keeps detailed process output and actionable errors.
+The **Training lab** tab provides safe `.osz` ingestion, explicit GOOD-map
+curation, scan/statistics/split/feature/window controls, Conformer-v3 and
+Placement-v1 GPU training, calibration, held-out evaluation, review packages,
+and placement analysis. Both sides scroll independently on smaller screens. The
+**Activity** tab keeps detailed process output and actionable errors.
 
 ## Presets and rulesets
 
@@ -193,11 +200,13 @@ The most useful `generate` options are:
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
 | `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |
 | `--modern-model PATH` | Select a modern model directory or `.keras` file. |
+| `--placement-model PATH` | Select a trained Placement-v1 directory or `.keras` file. |
 | `--rhythm-threshold NUMBER` | Override the modern model's hit-probability threshold. |
 | `--target-density NUMBER` | Cap modern output at a target number of objects per second. |
 | `--flow-engine auto` | Use the compatible legacy flow model when available. |
 | `--flow-engine legacy` | Require the legacy per-map flow model. |
 | `--flow-engine deterministic` | Use the fast, seeded cross-platform flow implementation. |
+| `--flow-engine placement` | Use learned Placement-v1 flow with the modern rhythm engine. |
 | `--bpm NUMBER` | Override timing estimation for audio-only input. |
 | `--offset MS` | Set the first timing-point offset for audio-only input. |
 | `--keys NUMBER` | Set mania key count for audio-only input. |
@@ -243,6 +252,69 @@ the same `--data-root PATH` to every dataset, training, evaluation, and analysis
 command. Audio is read from your Songs directory and cached as numerical features;
 the source audio and beatmaps are not copied or modified.
 
+### NVIDIA GPU training on Windows with WSL2
+
+Current TensorFlow releases do not provide CUDA training through the native
+Windows package. Windows users with an NVIDIA GPU should run training inside
+WSL2. Generation can continue to run from the normal Windows installation.
+
+Install Ubuntu from an elevated PowerShell window, restart Windows when prompted,
+and verify that the distribution is using WSL2:
+
+```powershell
+wsl --install -d Ubuntu
+wsl.exe --update
+wsl.exe --list --verbose
+wsl.exe -d Ubuntu
+```
+
+Commands beginning with `wsl.exe` are Windows commands. After the final command,
+the prompt is inside Ubuntu and Linux commands should be used. Install the project
+in a separate Linux workspace; do not reuse the Windows `.venv` through `/mnt/c`,
+because Windows and Linux virtual environments are incompatible:
+
+```bash
+sudo apt update
+sudo apt install -y git curl build-essential ffmpeg python3-tk
+curl -LsSf https://astral.sh/uv/install.sh | sh
+source "$HOME/.local/bin/env"
+git clone https://github.com/BenjiCollege/osumapper.git "$HOME/osumapper"
+cd "$HOME/osumapper"
+uv sync --locked --extra gpu
+```
+
+The `gpu` extra keeps the CUDA-enabled TensorFlow dependencies associated with
+the WSL project environment. Confirm both WSL GPU passthrough and TensorFlow GPU
+detection before starting a long run:
+
+```bash
+nvidia-smi
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu python -c "import tensorflow as tf; g=tf.config.list_physical_devices('GPU'); assert g, 'NVIDIA GPU unavailable'; print('TensorFlow:', tf.__version__); print('GPU:', g)"
+```
+
+Use `--device gpu` for every GPU training command. Unlike `--device auto`, this
+fails immediately if TensorFlow cannot see a GPU instead of silently training on
+the CPU. `CUDA_VISIBLE_DEVICES=0` selects the first NVIDIA GPU; on a one-GPU
+machine that is the installed card. Audio decoding and feature extraction still
+use the CPU, while TensorFlow model training uses the GPU.
+
+Do not copy `dataset.parquet` from Windows and use it unchanged in WSL: it contains
+absolute audio and map paths. Re-scan the Songs directory using its WSL mount path,
+then recreate the deterministic split. In interactive Bash, single-quote a path
+containing `osu!` (or run `set +H`) so `!` is not treated as history expansion:
+
+```bash
+cd "$HOME/osumapper"
+set +H
+uv run --extra gpu osumapper dataset scan '/mnt/e/Games/osu!/Songs' --data-root "$HOME/osumapper/training_data"
+uv run --extra gpu osumapper dataset split --data-root "$HOME/osumapper/training_data" --seed 2026 --include-unrated
+uv run --extra gpu osumapper dataset features --data-root "$HOME/osumapper/training_data"
+```
+
+Only use `--include-unrated` for an explicitly experimental dataset. A successful
+feature pass must report `"failed": 0`. Decoder warnings about damaged ID3 or MPEG
+metadata can be non-fatal when extraction still finishes with zero failures.
+
 ### 1. Scan and curate a local dataset
 
 Point the scanner at an osu!stable-style Songs directory. Malformed maps, missing
@@ -271,11 +343,39 @@ Ratings persist in `training_data/ratings.json` and update the current Parquet
 index. By default, only maps marked `good` are eligible for training. Use
 `dataset split --include-unrated` only when you deliberately want unrated maps.
 
+Downloaded `.osz` packages do not need to be unpacked by hand. This safely
+extracts every package under the selected folder into the ignored training
+workspace and appends its maps without removing the existing Songs index:
+
+```powershell
+uv run osumapper dataset import-osz "C:\Users\bcten\Downloads\osz"
+```
+
+If, and only if, every package in that folder has been reviewed and is a trusted
+mapping reference, mark those imported maps GOOD in the same operation:
+
+```powershell
+uv run osumapper dataset import-osz "C:\Users\bcten\Downloads\osz" --rating good
+```
+
+The WSL equivalent for this repository is:
+
+```bash
+uv run --extra gpu osumapper dataset import-osz \
+  '/mnt/c/Users/bcten/Downloads/osz' \
+  --data-root "$HOME/osumapper/training_data" \
+  --rating good
+```
+
+`--rating good` is an explicit trust decision, not an automatic quality claim.
+After importing or changing ratings, always recreate the split and features.
+
 ### 2. Split songs and cache features
 
 ```powershell
 uv run osumapper dataset split --seed 2026
 uv run osumapper dataset features
+uv run osumapper dataset windows --sequence-length 512 --audio-context-radius 0
 ```
 
 The split is deterministic and groups every difficulty from the same song/mapset
@@ -290,7 +390,14 @@ configuration. Candidate hit positions are built from the map timing grid at
 1/1, 1/2, 1/3, 1/4, 1/6, and 1/8 subdivisions; each human object is matched to at
 most one candidate within the configured tolerance.
 
-### 3. Preserve Transformer-v1 and train Conformer-v2
+`dataset windows` writes deterministic float16 shards under
+`training_data/window_shards/`. Training creates or reuses the same shards
+automatically. This moves JSON/NPZ parsing out of repeated epochs so the GPU is
+fed a shard at a time. Use `--rebuild` only after deliberately changing the
+preprocessing implementation; configuration and map hashes otherwise select the
+correct cache automatically.
+
+### 3. Preserve the completed baselines and train Conformer-v3
 
 ```powershell
 uv run osumapper train rhythm --architecture transformer-v1 --epochs 50 --batch-size 16 --seed 2026 --device auto
@@ -316,11 +423,123 @@ uv run osumapper train rhythm --architecture conformer-v2 --sequence-length 512 
 Both architectures use the exact existing song-level split manifest. Compare
 them only when the dataset hash and train/validation/test assignments match.
 
-To continue an interrupted run with the same architecture, context radius, split,
-and output directory:
+The completed 50-epoch WSL model at
+`$HOME/osumapper/models/modern/rhythm-conformer-v2-wsl-seed-2026-50` is the
+Conformer-v2 baseline. Preserve it; do not resume or overwrite it. Conformer-v3
+uses a new output directory. It removes the nine-frame input expansion used by
+v2 and learns local temporal context inside the Conformer, masks padded
+attention positions, uses a gated convolution module, AdamW, per-song balancing,
+mixed precision, cached shards, adaptive learning rate, and early stopping.
+
+After adding trusted rated maps, rebuild the split without `--include-unrated` so
+only GOOD maps train the accuracy run:
+
+```bash
+cd "$HOME/osumapper"
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper dataset split \
+  --data-root "$HOME/osumapper/training_data" \
+  --seed 2026
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper dataset features \
+  --data-root "$HOME/osumapper/training_data"
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper dataset windows \
+  --data-root "$HOME/osumapper/training_data" \
+  --sequence-length 512 \
+  --audio-context-radius 0
+```
+
+Start the isolated Conformer-v3 run on the RTX 4070:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --output "$HOME/osumapper/models/modern/rhythm-conformer-v3-rated-seed-2026" \
+  --architecture conformer-v3 \
+  --epochs 75 \
+  --batch-size 32 \
+  --learning-rate 0.0005 \
+  --sequence-length 512 \
+  --audio-context-radius 0 \
+  --device gpu \
+  --precision mixed-float16 \
+  --xla auto \
+  --window-cache auto \
+  --early-stopping-patience 8 \
+  --lr-patience 3 \
+  --lr-factor 0.5 \
+  --weight-decay 0.0001 \
+  --seed 2026
+```
+
+The probability head stays float32 for stable loss and calibration even when
+the encoder uses Tensor Cores. `--device gpu` fails instead of silently using
+CPU. If batch 32 exhausts the RTX 4070's memory, start a new output folder with
+batch 16. Do not change batch size, precision, split, architecture, or
+preprocessing while resuming an existing run.
+
+To continue an interrupted v3 run, repeat its full command unchanged and add
+`--resume`. `--epochs 75` is the total target, not 75 additional epochs. Resume
+validation rejects changed batch size, learning rate, seed, precision, XLA,
+scheduler, balancing, weight decay, architecture, context, or split.
+
+For baseline reproduction only, the completed WSL2 Conformer-v2 command was:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --output "$HOME/osumapper/models/modern/rhythm-conformer-v2-wsl-seed-2026-50" \
+  --architecture conformer-v2 \
+  --epochs 50 \
+  --batch-size 16 \
+  --learning-rate 0.001 \
+  --sequence-length 512 \
+  --audio-context-radius 4 \
+  --device gpu \
+  --seed 2026
+```
+
+Training writes `last.keras`, `best.keras`, `training_state.json`, history, CSV,
+and TensorBoard data after each completed epoch. To continue after closing the
+terminal or restarting Windows, enter Ubuntu again and inspect the saved state:
 
 ```powershell
-uv run osumapper train rhythm --resume --epochs 50 --seed 2026
+wsl.exe -d Ubuntu
+```
+
+```bash
+cd "$HOME/osumapper"
+source "$HOME/.local/bin/env"
+nvidia-smi
+cat "$HOME/osumapper/models/modern/rhythm-conformer-v2-wsl-seed-2026-50/training_state.json"
+```
+
+Then use the identical command and add `--resume`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --output "$HOME/osumapper/models/modern/rhythm-conformer-v2-wsl-seed-2026-50" \
+  --architecture conformer-v2 \
+  --epochs 50 \
+  --batch-size 16 \
+  --learning-rate 0.001 \
+  --sequence-length 512 \
+  --audio-context-radius 4 \
+  --device gpu \
+  --seed 2026 \
+  --resume
+```
+
+`--epochs 50` means 50 total epochs, not 50 additional epochs. A run with six
+completed epochs therefore resumes at epoch seven. If interruption occurs during
+an epoch, the last completed checkpoint is retained and that incomplete epoch is
+repeated. Do not scan, rate, or split the dataset while a run is in progress;
+resume validation intentionally rejects a changed split. Feature-cache validation
+may run again before the model loads, which is expected.
+
+Monitor utilization from a second Ubuntu terminal while training is active:
+
+```bash
+watch -n 2 nvidia-smi
 ```
 
 Do not resume a model merely to increase its recorded epoch count. Each epoch is
@@ -328,8 +547,9 @@ now regression-tested to contain non-zero training and validation work. Historic
 runs affected by the former alternating empty-epoch bug should remain snapshots;
 start a clean corrected run in a new output directory.
 
-`--device auto` selects an available GPU and otherwise uses CPU. You can require
-one explicitly with `--device gpu` or `--device cpu`. TensorFlow training can need
+`--device auto` selects an available GPU and otherwise uses CPU. For long GPU
+runs, use `--device gpu` so a broken CUDA environment cannot fall back unnoticed,
+or use `--device cpu` to require CPU execution. TensorFlow training can need
 substantial memory and time on a large collection.
 
 ### 4. Calibrate on validation, then evaluate once on unseen songs
@@ -341,12 +561,24 @@ uv run osumapper train calibrate rhythm --model models/modern/rhythm
 ```
 
 The command maximizes candidate-level F1 using validation songs only, breaks ties
-toward the higher/safer threshold, writes `threshold_calibration.json`, and makes
-generation, analysis, and evaluation use that threshold by default. An explicit
+toward the higher/safer threshold, also calibrates low-, medium-, and
+high-density bands, writes `threshold_calibration.json`, and makes generation,
+analysis, and evaluation use the matching threshold by default. An explicit
 `--threshold` or `--rhythm-threshold` still overrides it.
 
+For the new v3 run, calibrate and evaluate with the exact paths:
+
+```bash
+uv run --extra gpu osumapper train calibrate rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v3-rated-seed-2026"
+uv run --extra gpu osumapper train evaluate rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v3-rated-seed-2026"
+```
+
 ```powershell
-uv run osumapper train evaluate rhythm
+uv run osumapper train evaluate rhythm --model models/modern/rhythm
 ```
 
 Evaluation is hard-wired to the held-out test partition. It reports precision,
@@ -386,21 +618,70 @@ changes the decision threshold rather than probability ranking.
 Five deterministic review packages from this baseline are available locally at
 `output/held-out-review-transformer-v1/` with their exact source-map manifest.
 
+### 5. Train Placement-v1 and analyze flow
+
+Rhythm decides *when* objects occur. Placement-v1 is a separate model that
+learns rotationally relative jump distance/turn patterns, circle/slider/spinner
+type, slider length, and combo changes from the same song-level split. It is kept
+separate so rhythm-v3 can be evaluated before placement changes the output.
+
+Train it on the RTX 4070 after the rated-only split is stable:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
+  --data-root "$HOME/osumapper/training_data" \
+  --output "$HOME/osumapper/models/modern/placement-v1-rated-seed-2026" \
+  --epochs 75 \
+  --batch-size 32 \
+  --learning-rate 0.0005 \
+  --sequence-length 256 \
+  --device gpu \
+  --precision mixed-float16 \
+  --xla auto \
+  --early-stopping-patience 8 \
+  --weight-decay 0.0001 \
+  --seed 2026
+```
+
+Evaluate jump distance, turn angle, object type, slider length, and combo
+prediction on held-out test songs:
+
+```bash
+uv run --extra gpu osumapper train evaluate placement \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/placement-v1-rated-seed-2026"
+```
+
+Placement inference constrains generated objects and slider endpoints to the
+playfield and caps jump distance using the available time. It remains an
+experimental learned starting point; review every map in the osu! editor.
+
+Analyze any standard `.osu` map without training a placement model:
+
+```powershell
+uv run osumapper placement analyze "C:\Users\bcten\Downloads\reviewed-map.osu"
+```
+
+The JSON report includes offscreen objects/slider points, stacking, edge use,
+position diversity, jump distance and speed percentiles, turn angles, a
+transition timeline, and a clearly labeled heuristic score. These diagnostics
+measure obvious flow/playability problems; they are not proof of map quality.
+
 ### Recommended research order
 
 For meaningful quality gains, curate and rate maps before scaling model size.
-Train a rated-only Conformer-v2 on the unchanged seed-2026 split, calibrate on
-validation songs, and compare the same test metrics and review-song rubric against
-Transformer-v1. Review timing, rhythm choice, density, pattern readability,
-spacing, and playability separately; one aggregate score can hide regressions.
+Train rated-only Conformer-v3 on seed 2026, calibrate on validation songs, and
+compare the same test metrics and review-song rubric against the completed
+Conformer-v2 baseline. Review timing, rhythm choice, density, pattern
+readability, spacing, and playability separately; one aggregate score can hide
+regressions.
 
-After that comparison, the highest-value extensions are difficulty-conditioned
-thresholds/density, per-song sampling so large mapsets cannot dominate, continuous
-audio-frame prediction before timing-grid projection, and an optional maintained
-beat/downbeat front end. On Windows, use TensorFlow through WSL2 for RTX GPU
-training; native Windows TensorFlow remains CPU-only in this tested setup. Keep
-third-party audio encoders optional until their license permits the way you intend
-to distribute the resulting model.
+Conformer-v3 now implements difficulty-conditioned thresholds, per-song
+weighting, cached shards, and the controlled Placement-v1 boundary. The next
+research step is an ablation on an optional frozen MERT front end; it is not
+enabled by default because it adds preprocessing time, storage, licensing, and
+distribution considerations. Establish the rated v3 and Placement-v1 scores
+first so MERT has a fair baseline to beat.
 
 Inspect one human map against the model and export a timestamp-by-timestamp JSON
 and CSV timeline:
@@ -412,7 +693,7 @@ uv run osumapper analyze "E:\Games\osu!\Songs\123 Artist - Song\map.osu" --forma
 The report includes human hits, predicted hits, matched/missed/extra events, timing
 error, beat position, onset strength, and prediction probability.
 
-### 5. Generate with the trained model
+### 6. Generate with the trained models
 
 ```powershell
 uv run osumapper generate song.osz --rhythm-engine modern --flow-engine deterministic --open
@@ -424,6 +705,19 @@ Use `--modern-model PATH` for a non-default model, `--rhythm-threshold` to adjus
 selection, and `--target-density` to cap objects per second. It exits with an
 actionable error if the model selects no usable events. Omit `--rhythm-engine
 modern` to retain the original behavior.
+
+Use both learned models in WSL after training:
+
+```bash
+uv run --extra gpu osumapper generate song.osz \
+  --rhythm-engine modern \
+  --modern-model "$HOME/osumapper/models/modern/rhythm-conformer-v3-rated-seed-2026" \
+  --flow-engine placement \
+  --placement-model "$HOME/osumapper/models/modern/placement-v1-rated-seed-2026" \
+  --target-density 2.0 \
+  --seed 2026 \
+  --open
+```
 
 ## Model migration and verification
 
@@ -547,7 +841,9 @@ src/osumapper/training/  Local dataset, preprocessing, model, and evaluation cod
 models/                  Migrated legacy .keras models and parity manifests
 models/modern/rhythm/    Ignored local modern-model output after training
 models/modern/rhythm-conformer-v2/  Separate ignored Conformer-v2 output
-training_data/           Ignored local metadata, splits, and feature cache
+models/modern/rhythm-conformer-v3/  Faster isolated Conformer-v3 output
+models/modern/placement-v1/         Learned flow/object-type output
+training_data/           Ignored metadata, imports, splits, features, and window shards
 tests/                   Fixtures, golden outputs, and regression tests
 legacy/                  Preservation and compatibility documentation
 v6.2/                    Untouched historical v6.2 implementation

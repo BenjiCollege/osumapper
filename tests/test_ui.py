@@ -49,6 +49,7 @@ class UiHelperTests(unittest.TestCase):
                     flow_engine="deterministic",
                     rhythm_engine="modern",
                     modern_model=root / "model",
+                    placement_model=root / "placement",
                     threshold=0.8,
                     density=3.0,
                     key_count=7,
@@ -58,6 +59,7 @@ class UiHelperTests(unittest.TestCase):
 
             self.assertEqual(output.name, "song-2.osz")
             self.assertIn("--modern-model", command)
+            self.assertIn("--placement-model", command)
             self.assertIn("--rhythm-threshold", command)
             self.assertIn("--target-density", command)
             self.assertIn("--open", command)

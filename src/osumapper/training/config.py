@@ -13,6 +13,7 @@ class DatasetPaths:
     dataset: Path
     maps: Path
     features: Path
+    windows: Path
     splits: Path
     ratings: Path
     skipped: Path
@@ -26,6 +27,7 @@ class DatasetPaths:
             dataset=resolved / "dataset.parquet",
             maps=resolved / "maps",
             features=resolved / "features",
+            windows=resolved / "window_shards",
             splits=resolved / "splits",
             ratings=resolved / "ratings.json",
             skipped=resolved / "skipped.jsonl",
@@ -36,6 +38,7 @@ class DatasetPaths:
         self.root.mkdir(parents=True, exist_ok=True)
         self.maps.mkdir(parents=True, exist_ok=True)
         self.features.mkdir(parents=True, exist_ok=True)
+        self.windows.mkdir(parents=True, exist_ok=True)
         self.splits.mkdir(parents=True, exist_ok=True)
 
 
@@ -90,21 +93,45 @@ class RhythmTrainingConfig:
     include_unrated: bool = False
     architecture: str = "transformer-v1"
     audio_context_radius: int = 0
+    precision: str = "auto"
+    xla: str = "auto"
+    early_stopping_patience: int = 8
+    learning_rate_patience: int = 3
+    learning_rate_factor: float = 0.5
+    minimum_learning_rate: float = 1e-5
+    balance_songs: bool = True
+    window_cache: str = "auto"
+    weight_decay: float = 1e-4
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def prediction_threshold(model_config: dict[str, Any], override: float | None = None) -> float:
+def prediction_threshold(
+    model_config: dict[str, Any],
+    override: float | None = None,
+    *,
+    target_density: float | None = None,
+) -> float:
     """Resolve an explicit, validation-calibrated, or training-default threshold."""
-    value = (
-        override
-        if override is not None
-        else model_config.get("calibration", {}).get(
+    calibration = model_config.get("calibration", {})
+    value: Any = override
+    if value is None and target_density is not None:
+        matching = next(
+            (
+                band
+                for band in calibration.get("density_bands", [])
+                if float(band["minimum_density"]) <= target_density < float(band["maximum_density"])
+            ),
+            None,
+        )
+        if matching is not None:
+            value = matching["threshold"]
+    if value is None:
+        value = calibration.get(
             "threshold",
             model_config.get("training", {}).get("prediction_threshold", 0.5),
         )
-    )
     threshold = float(value)
     if not 0 < threshold < 1:
         raise ValueError("Prediction threshold must be between 0 and 1.")

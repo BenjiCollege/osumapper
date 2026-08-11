@@ -356,8 +356,20 @@ def generate_document(
             progress=progress,
         )
         progress(f"Modern rhythm selected {len(prediction.timestamps_ms)} timestamps")
-        converted = _modern_converted(document, prediction.timestamps_ms, preset)
-        objects = _place_standard_objects(workspace, preset, config, progress, converted)
+        if config.flow_engine == "placement":
+            from osumapper.training.placement_learning import predict_placement
+
+            progress("Generating learned Placement-v1 flow and object types")
+            objects = predict_placement(
+                document,
+                prediction.timestamps_ms,
+                model_root=config.placement_model,
+                target_density=prediction.target_density,
+                seed=config.seed,
+            )
+        else:
+            converted = _modern_converted(document, prediction.timestamps_ms, preset)
+            objects = _place_standard_objects(workspace, preset, config, progress, converted)
     else:
         progress("Preparing legacy rhythm audio features")
         _prepare_model_input(document, audio, workspace / "mapthis.npz")

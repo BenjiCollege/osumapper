@@ -70,7 +70,12 @@ def analyze_map(
     model_config = read_json(root / "config.json", default=None)
     if model_config is None or not model_path.is_file():
         raise InputError(f"Modern rhythm model is missing under {root}; train it first.")
-    selected_threshold = prediction_threshold(model_config, threshold)
+    stats = parsed.statistics
+    selected_threshold = prediction_threshold(
+        model_config,
+        threshold,
+        target_density=float(stats["objects_per_second"]),
+    )
     grid_config = GridConfig(
         sequence_length=int(model_config["training"]["sequence_length"]),
         prediction_threshold=selected_threshold,
@@ -94,7 +99,6 @@ def analyze_map(
     labels = np.asarray([candidate.label for candidate in grid.candidates], dtype=np.float32)[
         :, None
     ]
-    stats = parsed.statistics
     difficulty = np.asarray(
         [
             parsed.difficulty["od"] / 10.0,

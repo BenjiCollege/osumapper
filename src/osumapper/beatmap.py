@@ -238,6 +238,7 @@ def serialize_hit_object(obj: dict[str, Any]) -> str:
     y = _clamp(float(obj.get("y", 192)), 0, 384)
     timestamp = max(0, int(round(float(obj.get("time", 0)))))
     object_type = int(obj.get("type", 1))
+    combo_flags = object_type & (4 | 16 | 32 | 64)
     hitsounds = int(obj.get("hitsounds", 0))
     extended = str(obj.get("extHitsounds") or "0:0:0:0:")
 
@@ -251,13 +252,13 @@ def serialize_hit_object(obj: dict[str, Any]) -> str:
         end_x = _clamp(float(endpoint[0]), 0, 512)
         end_y = _clamp(float(endpoint[1]), 0, 384)
         return (
-            f"{x},{y},{timestamp},2,{hitsounds},L|{end_x}:{end_y},1,"
+            f"{x},{y},{timestamp},{2 | combo_flags},{hitsounds},L|{end_x}:{end_y},1,"
             f"{length:.3f},0|0,0:0|0:0,{extended}"
         )
     if object_type & 8:
         end_time = max(timestamp + 1, int(obj.get("spinnerEndTime", timestamp + 1000)))
-        return f"{x},{y},{timestamp},8,{hitsounds},{end_time},{extended}"
+        return f"{x},{y},{timestamp},{8 | combo_flags},{hitsounds},{end_time},{extended}"
     if object_type & 128:
         end_time = max(timestamp + 1, int(obj.get("holdEndTime", timestamp + 1)))
         return f"{x},{y},{timestamp},128,{hitsounds},{end_time}:{extended}"
-    return f"{x},{y},{timestamp},1,{hitsounds},{extended}"
+    return f"{x},{y},{timestamp},{1 | combo_flags},{hitsounds},{extended}"
