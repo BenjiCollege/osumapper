@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+import os
 import queue
 import subprocess
 import sys
 import threading
 import tkinter as tk
+from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 from tkinterdnd2 import DND_FILES, TkinterDnD
 
+from osumapper.paths import project_root
 from osumapper.presets import preset_names
+from osumapper.training.config import DatasetPaths
+from osumapper.training.storage import read_json
 
 SUPPORTED_INPUTS = {
     ".osz",
@@ -23,155 +29,931 @@ SUPPORTED_INPUTS = {
     ".aac",
     ".opus",
 }
+AUDIO_INPUTS = SUPPORTED_INPUTS - {".osz", ".osu"}
+
+BACKGROUND = "#0b1020"
+PANEL = "#141b2d"
+PANEL_ALT = "#1b2438"
+TEXT = "#eef2ff"
+MUTED = "#9aa6bd"
+ACCENT = "#5b8cff"
+ACCENT_ACTIVE = "#79a2ff"
+SUCCESS = "#42c89a"
+ERROR = "#ff6b7a"
+
+
+@dataclass(frozen=True, slots=True)
+class GenerationOptions:
+    preset: str = "default"
+    mode: str = "auto"
+    seed: int = 2026
+    flow_engine: str = "auto"
+    rhythm_engine: str = "legacy"
+    modern_model: Path | None = None
+    threshold: float | None = None
+    density: float | None = None
+    difficulty: str | None = None
+    bpm: float | None = None
+    offset_ms: int | None = None
+    key_count: int = 4
+    open_in_lazer: bool = True
+
+
+@dataclass(slots=True)
+class QueueEntry:
+    source: Path
+    status: str = "Ready"
+    output: Path | None = None
+
+
+def discover_inputs(paths: list[Path], *, all_difficulties: bool = False) -> list[Path]:
+    """Expand dropped files/folders into a stable, duplicate-free generation queue."""
+    discovered: list[Path] = []
+    for candidate in paths:
+        path = candidate.expanduser().resolve()
+        if path.is_file():
+            if path.suffix.casefold() in SUPPORTED_INPUTS:
+                discovered.append(path)
+            continue
+        if not path.is_dir():
+            continue
+        directories = [path, *(item for item in path.rglob("*") if item.is_dir())]
+        for directory in sorted(directories, key=lambda item: str(item).casefold()):
+            files = sorted(
+                (item for item in directory.iterdir() if item.is_file()),
+                key=lambda item: item.name.casefold(),
+            )
+            packages = [item for item in files if item.suffix.casefold() == ".osz"]
+            maps = [item for item in files if item.suffix.casefold() == ".osu"]
+            audio = [item for item in files if item.suffix.casefold() in AUDIO_INPUTS]
+            discovered.extend(packages)
+            if maps:
+                discovered.extend(maps if all_difficulties else maps[:1])
+            elif not packages:
+                discovered.extend(audio)
+    unique: dict[str, Path] = {}
+    for path in discovered:
+        unique.setdefault(os.path.normcase(str(path)), path)
+    return list(unique.values())
+
+
+def unique_output_path(path: Path, reserved: set[Path] | None = None) -> Path:
+    reserved_paths = {item.resolve() for item in (reserved or set())}
+    candidate = path.expanduser().resolve()
+    number = 2
+    while candidate.exists() or candidate in reserved_paths:
+        candidate = path.with_name(f"{path.stem}-{number}{path.suffix}").expanduser().resolve()
+        number += 1
+    return candidate
+
+
+def build_generate_command(source: Path, output: Path, options: GenerationOptions) -> list[str]:
+    command = [
+        sys.executable,
+        "-m",
+        "osumapper",
+        "generate",
+        str(source),
+        "--output",
+        str(output),
+        "--preset",
+        options.preset,
+        "--seed",
+        str(options.seed),
+        "--flow-engine",
+        options.flow_engine,
+        "--rhythm-engine",
+        options.rhythm_engine,
+        "--keys",
+        str(options.key_count),
+    ]
+    if options.mode != "auto":
+        command.extend(("--mode", options.mode))
+    if options.modern_model is not None:
+        command.extend(("--modern-model", str(options.modern_model)))
+    if options.threshold is not None:
+        command.extend(("--rhythm-threshold", str(options.threshold)))
+    if options.density is not None:
+        command.extend(("--target-density", str(options.density)))
+    if options.difficulty:
+        command.extend(("--difficulty", options.difficulty))
+    if options.bpm is not None:
+        command.extend(("--bpm", str(options.bpm)))
+    if options.offset_ms is not None:
+        command.extend(("--offset", str(options.offset_ms)))
+    if options.open_in_lazer:
+        command.append("--open")
+    return command
+
+
+class OsumapperStudio:
+    def __init__(self, root: Any) -> None:
+        self.root = root
+        self.root.title("osumapper Studio for osu!lazer")
+        self.root.geometry("1120x780")
+        self.root.minsize(940, 660)
+        self.root.configure(background=BACKGROUND)
+        self.events: queue.Queue[tuple[Any, ...]] = queue.Queue()
+        self.entries: dict[str, QueueEntry] = {}
+        self.active_process: subprocess.Popen[str] | None = None
+        self.stop_requested = False
+        self.busy = False
+        self._configure_style()
+        self._variables()
+        self._build()
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        self.root.after(100, self._poll)
+
+    def _configure_style(self) -> None:
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure(".", background=PANEL, foreground=TEXT, font=("Segoe UI", 10))
+        style.configure("Root.TFrame", background=BACKGROUND)
+        style.configure("Panel.TFrame", background=PANEL)
+        style.configure("Card.TFrame", background=PANEL_ALT)
+        style.configure("TLabel", background=PANEL, foreground=TEXT)
+        style.configure("Muted.TLabel", foreground=MUTED, background=BACKGROUND)
+        style.configure(
+            "Header.TLabel", background=BACKGROUND, foreground=TEXT, font=("Segoe UI Semibold", 23)
+        )
+        style.configure(
+            "Subheader.TLabel", background=BACKGROUND, foreground=MUTED, font=("Segoe UI", 10)
+        )
+        style.configure(
+            "CardTitle.TLabel",
+            background=PANEL_ALT,
+            foreground=TEXT,
+            font=("Segoe UI Semibold", 11),
+        )
+        style.configure("CardText.TLabel", background=PANEL_ALT, foreground=MUTED)
+        style.configure(
+            "TButton", background=PANEL_ALT, foreground=TEXT, padding=(12, 7), borderwidth=0
+        )
+        style.map("TButton", background=[("active", "#28344e"), ("disabled", PANEL)])
+        style.configure(
+            "Accent.TButton", background=ACCENT, foreground="white", font=("Segoe UI Semibold", 10)
+        )
+        style.map("Accent.TButton", background=[("active", ACCENT_ACTIVE), ("disabled", "#334265")])
+        style.configure("Danger.TButton", background="#4a2530", foreground="#ffb4bd")
+        style.map("Danger.TButton", background=[("active", "#62303d")])
+        style.configure(
+            "TEntry",
+            fieldbackground="#0f1627",
+            foreground=TEXT,
+            insertcolor=TEXT,
+            bordercolor="#2b3855",
+        )
+        style.configure(
+            "TCombobox",
+            fieldbackground="#0f1627",
+            background=PANEL_ALT,
+            foreground=TEXT,
+            arrowcolor=TEXT,
+        )
+        style.map(
+            "TCombobox",
+            fieldbackground=[("readonly", "#0f1627")],
+            selectbackground=[("readonly", "#0f1627")],
+            selectforeground=[("readonly", TEXT)],
+        )
+        style.configure("TCheckbutton", background=PANEL_ALT, foreground=TEXT)
+        style.map("TCheckbutton", background=[("active", PANEL_ALT)])
+        style.configure("TNotebook", background=BACKGROUND, borderwidth=0)
+        style.configure(
+            "TNotebook.Tab", background=PANEL, foreground=MUTED, padding=(18, 9), borderwidth=0
+        )
+        style.map(
+            "TNotebook.Tab", background=[("selected", PANEL_ALT)], foreground=[("selected", TEXT)]
+        )
+        style.configure(
+            "Treeview",
+            background="#0f1627",
+            fieldbackground="#0f1627",
+            foreground=TEXT,
+            rowheight=30,
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=PANEL_ALT,
+            foreground=MUTED,
+            font=("Segoe UI Semibold", 9),
+            borderwidth=0,
+        )
+        style.map(
+            "Treeview", background=[("selected", "#29477b")], foreground=[("selected", "white")]
+        )
+        style.configure(
+            "Horizontal.TProgressbar", troughcolor="#0f1627", background=ACCENT, borderwidth=0
+        )
+
+    def _variables(self) -> None:
+        root = project_root()
+        paths = DatasetPaths.at()
+        dataset_config = read_json(paths.config, default={})
+        self.output_dir = tk.StringVar(value=str(root / "output"))
+        self.preset = tk.StringVar(value="default")
+        self.mode = tk.StringVar(value="auto")
+        self.seed = tk.StringVar(value="2026")
+        self.flow_engine = tk.StringVar(value="deterministic")
+        self.rhythm_engine = tk.StringVar(value="legacy")
+        self.modern_model = tk.StringVar(value=str(root / "models" / "modern" / "rhythm"))
+        self.threshold = tk.StringVar()
+        self.density = tk.StringVar()
+        self.difficulty = tk.StringVar()
+        self.bpm = tk.StringVar()
+        self.offset = tk.StringVar()
+        self.keys = tk.StringVar(value="4")
+        self.open_lazer = tk.BooleanVar(value=True)
+        self.all_difficulties = tk.BooleanVar(value=False)
+        self.status = tk.StringVar(value="Ready")
+
+        self.data_root = tk.StringVar(value=str(paths.root))
+        self.songs_root = tk.StringVar(value=str(dataset_config.get("songs_root", "")))
+        self.include_unrated = tk.BooleanVar(value=False)
+        self.train_architecture = tk.StringVar(value="conformer-v2")
+        self.train_output = tk.StringVar(
+            value=str(root / "models" / "modern" / "rhythm-conformer-v2")
+        )
+        self.epochs = tk.StringVar(value="50")
+        self.batch_size = tk.StringVar(value="16")
+        self.learning_rate = tk.StringVar(value="0.001")
+        self.sequence_length = tk.StringVar(value="512")
+        self.context_radius = tk.StringVar(value="4")
+        self.device = tk.StringVar(value="auto")
+        self.resume = tk.BooleanVar(value=False)
+        self.review_count = tk.StringVar(value="5")
+
+    def _build(self) -> None:
+        shell = ttk.Frame(self.root, style="Root.TFrame", padding=(22, 16, 22, 16))
+        shell.pack(fill="both", expand=True)
+        header = ttk.Frame(shell, style="Root.TFrame")
+        header.pack(fill="x", pady=(0, 13))
+        ttk.Label(header, text="osumapper Studio", style="Header.TLabel").pack(anchor="w")
+        ttk.Label(
+            header,
+            text="Queue, train, review, and import osu!lazer beatmaps locally.",
+            style="Subheader.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
+        notebook = ttk.Notebook(shell)
+        notebook.pack(fill="both", expand=True)
+        self.generate_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=14)
+        self.training_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=14)
+        self.activity_tab = ttk.Frame(notebook, style="Panel.TFrame", padding=14)
+        notebook.add(self.generate_tab, text="Generate queue")
+        notebook.add(self.training_tab, text="Training lab")
+        notebook.add(self.activity_tab, text="Activity")
+        self._build_generate_tab()
+        self._build_training_tab()
+        self._build_activity_tab()
+        footer = ttk.Frame(shell, style="Root.TFrame")
+        footer.pack(fill="x", pady=(11, 0))
+        ttk.Label(footer, textvariable=self.status, style="Muted.TLabel").pack(side="left")
+        self.progress = ttk.Progressbar(footer, mode="determinate", maximum=100, length=260)
+        self.progress.pack(side="right")
+
+    def _build_generate_tab(self) -> None:
+        pane = ttk.Panedwindow(self.generate_tab, orient="horizontal")
+        pane.pack(fill="both", expand=True)
+        queue_card = ttk.Frame(pane, style="Card.TFrame", padding=14)
+        settings = ttk.Frame(pane, style="Card.TFrame", padding=14, width=330)
+        pane.add(queue_card, weight=3)
+        pane.add(settings, weight=2)
+
+        ttk.Label(queue_card, text="Generation queue", style="CardTitle.TLabel").pack(anchor="w")
+        self.drop_zone = ttk.Label(
+            queue_card,
+            text="Drop files or folders here  •  .osz, .osu, and audio",
+            style="CardText.TLabel",
+            anchor="center",
+            padding=(12, 16),
+        )
+        self.drop_zone.pack(fill="x", pady=(10, 10))
+        controls = ttk.Frame(queue_card, style="Card.TFrame")
+        controls.pack(fill="x", pady=(0, 9))
+        ttk.Button(controls, text="Add files", command=self._choose_files).pack(side="left")
+        ttk.Button(controls, text="Add folder", command=self._choose_folder).pack(
+            side="left", padx=6
+        )
+        ttk.Button(controls, text="Remove", command=self._remove_selected).pack(side="left")
+        ttk.Button(controls, text="Clear queue", command=self._clear_queue).pack(
+            side="left", padx=6
+        )
+        ttk.Checkbutton(
+            controls,
+            text="Every difficulty",
+            variable=self.all_difficulties,
+            style="TCheckbutton",
+        ).pack(side="right")
+        tree_frame = ttk.Frame(queue_card, style="Card.TFrame")
+        tree_frame.pack(fill="both", expand=True)
+        self.queue_tree = ttk.Treeview(
+            tree_frame, columns=("source", "type", "status", "output"), show="headings"
+        )
+        self.queue_tree.heading("source", text="INPUT")
+        self.queue_tree.heading("type", text="TYPE")
+        self.queue_tree.heading("status", text="STATUS")
+        self.queue_tree.heading("output", text="OUTPUT")
+        self.queue_tree.column("source", width=270, minwidth=170)
+        self.queue_tree.column("type", width=60, anchor="center")
+        self.queue_tree.column("status", width=85, anchor="center")
+        self.queue_tree.column("output", width=190, minwidth=120)
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.queue_tree.yview)
+        self.queue_tree.configure(yscrollcommand=scrollbar.set)
+        self.queue_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        self._section(settings, "Output and import")
+        self._path_row(settings, "Output folder", self.output_dir, self._choose_output_folder)
+        ttk.Checkbutton(
+            settings,
+            text="Import each completed package into osu!lazer",
+            variable=self.open_lazer,
+        ).pack(anchor="w", pady=(5, 10))
+        self._section(settings, "Generation controls")
+        self._combo_row(settings, "Preset", self.preset, preset_names())
+        self._combo_row(
+            settings, "Mode", self.mode, ("auto", "standard", "taiko", "catch", "mania")
+        )
+        self._combo_row(settings, "Flow", self.flow_engine, ("auto", "deterministic", "legacy"))
+        self._combo_row(settings, "Rhythm", self.rhythm_engine, ("legacy", "modern"))
+        self._entry_row(settings, "Seed", self.seed)
+        self._entry_row(settings, "Difficulty", self.difficulty)
+        self._entry_row(settings, "Modern model", self.modern_model)
+        advanced = ttk.LabelFrame(settings, text="Advanced overrides", padding=9)
+        advanced.pack(fill="x", pady=(8, 10))
+        self._entry_row(advanced, "Threshold", self.threshold)
+        self._entry_row(advanced, "Density", self.density)
+        self._entry_row(advanced, "BPM", self.bpm)
+        self._entry_row(advanced, "Offset ms", self.offset)
+        self._entry_row(advanced, "Mania keys", self.keys)
+        actions = ttk.Frame(settings, style="Card.TFrame")
+        actions.pack(fill="x", side="bottom")
+        self.generate_button = ttk.Button(
+            actions, text="Run queue", style="Accent.TButton", command=self._start_queue
+        )
+        self.generate_button.pack(side="left", fill="x", expand=True)
+        self.stop_button = ttk.Button(
+            actions, text="Stop", style="Danger.TButton", command=self._stop, state="disabled"
+        )
+        self.stop_button.pack(side="left", padx=(8, 0))
+
+        for target in (self.root, self.drop_zone, self.queue_tree):
+            target.drop_target_register(DND_FILES)
+            target.dnd_bind("<<Drop>>", self._accept_drop)
+
+    def _build_training_tab(self) -> None:
+        columns = ttk.Panedwindow(self.training_tab, orient="horizontal")
+        columns.pack(fill="both", expand=True)
+        dataset = ttk.Frame(columns, style="Card.TFrame", padding=16)
+        model = ttk.Frame(columns, style="Card.TFrame", padding=16)
+        columns.add(dataset, weight=1)
+        columns.add(model, weight=1)
+
+        ttk.Label(dataset, text="Dataset workspace", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            dataset,
+            text="Build deterministic song-level splits without modifying your Songs folder.",
+            style="CardText.TLabel",
+            wraplength=410,
+        ).pack(anchor="w", pady=(3, 14))
+        self._path_row(dataset, "Songs folder", self.songs_root, self._choose_songs_folder)
+        self._path_row(dataset, "Data folder", self.data_root, self._choose_data_folder)
+        ttk.Checkbutton(
+            dataset,
+            text="Include unrated maps (experimental; quality not guaranteed)",
+            variable=self.include_unrated,
+        ).pack(anchor="w", pady=(8, 12))
+        dataset_buttons = ttk.Frame(dataset, style="Card.TFrame")
+        dataset_buttons.pack(fill="x")
+        for text, action in (
+            ("1  Scan", "scan"),
+            ("2  Stats", "stats"),
+            ("3  Split", "split"),
+            ("4  Features", "features"),
+        ):
+            ttk.Button(
+                dataset_buttons,
+                text=text,
+                command=lambda selected=action: self._run_dataset_action(selected),
+            ).pack(fill="x", pady=3)
+
+        ttk.Separator(dataset).pack(fill="x", pady=18)
+        ttk.Label(dataset, text="Validation and review", style="CardTitle.TLabel").pack(anchor="w")
+        self._entry_row(dataset, "Review packages", self.review_count)
+        ttk.Button(
+            dataset, text="Calibrate threshold (validation only)", command=self._calibrate
+        ).pack(fill="x", pady=3)
+        ttk.Button(dataset, text="Evaluate held-out test split", command=self._evaluate).pack(
+            fill="x", pady=3
+        )
+        ttk.Button(dataset, text="Generate held-out review packages", command=self._review).pack(
+            fill="x", pady=3
+        )
+
+        ttk.Label(model, text="Model training", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(
+            model,
+            text="Conformer-v2 is isolated from the preserved Transformer-v1 baseline.",
+            style="CardText.TLabel",
+            wraplength=410,
+        ).pack(anchor="w", pady=(3, 14))
+        self._combo_row(
+            model, "Architecture", self.train_architecture, ("conformer-v2", "transformer-v1")
+        )
+        self._path_row(model, "Model output", self.train_output, self._choose_train_output)
+        self._entry_row(model, "Epochs", self.epochs)
+        self._entry_row(model, "Batch size", self.batch_size)
+        self._entry_row(model, "Learning rate", self.learning_rate)
+        self._entry_row(model, "Sequence length", self.sequence_length)
+        self._entry_row(model, "Audio context", self.context_radius)
+        self._combo_row(model, "Device", self.device, ("auto", "cpu", "gpu"))
+        ttk.Checkbutton(model, text="Resume this exact run", variable=self.resume).pack(
+            anchor="w", pady=(8, 12)
+        )
+        ttk.Label(
+            model,
+            text=(
+                "Do not resume the preserved Transformer-v1 baseline. "
+                "Start Conformer-v2 in its separate output folder."
+            ),
+            style="CardText.TLabel",
+            wraplength=410,
+        ).pack(anchor="w", pady=(0, 12))
+        self.train_button = ttk.Button(
+            model, text="Start training", style="Accent.TButton", command=self._train
+        )
+        self.train_button.pack(fill="x", pady=3)
+        ttk.Button(
+            model, text="Stop active process", style="Danger.TButton", command=self._stop
+        ).pack(fill="x", pady=3)
+
+    def _build_activity_tab(self) -> None:
+        header = ttk.Frame(self.activity_tab, style="Panel.TFrame")
+        header.pack(fill="x", pady=(0, 8))
+        ttk.Label(header, text="Run log").pack(side="left")
+        ttk.Button(header, text="Clear log", command=self._clear_log).pack(side="right")
+        ttk.Button(header, text="Open output folder", command=self._open_output_folder).pack(
+            side="right", padx=6
+        )
+        self.log = tk.Text(
+            self.activity_tab,
+            background="#080d19",
+            foreground="#d8e2f5",
+            insertbackground=TEXT,
+            selectbackground="#29477b",
+            relief="flat",
+            font=("Cascadia Mono", 9),
+            wrap="word",
+            padx=12,
+            pady=12,
+            state="disabled",
+        )
+        self.log.pack(fill="both", expand=True)
+        self.log.tag_configure("error", foreground=ERROR)
+        self.log.tag_configure("success", foreground=SUCCESS)
+        self.log.tag_configure("muted", foreground=MUTED)
+
+    @staticmethod
+    def _section(parent: Any, text: str) -> None:
+        ttk.Label(parent, text=text, style="CardTitle.TLabel").pack(anchor="w", pady=(0, 7))
+
+    @staticmethod
+    def _entry_row(parent: Any, label: str, variable: tk.StringVar) -> None:
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=label, style="CardText.TLabel", width=15).pack(side="left")
+        ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
+
+    @staticmethod
+    def _combo_row(parent: Any, label: str, variable: tk.StringVar, values: Any) -> None:
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=label, style="CardText.TLabel", width=15).pack(side="left")
+        ttk.Combobox(row, textvariable=variable, values=values, state="readonly").pack(
+            side="left", fill="x", expand=True
+        )
+
+    @staticmethod
+    def _path_row(parent: Any, label: str, variable: tk.StringVar, command: Any) -> None:
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=label, style="CardText.TLabel", width=15).pack(side="left")
+        ttk.Entry(row, textvariable=variable).pack(side="left", fill="x", expand=True)
+        ttk.Button(row, text="…", width=3, command=command).pack(side="left", padx=(5, 0))
+
+    def _choose_files(self) -> None:
+        selected = filedialog.askopenfilenames(
+            title="Add beatmaps or audio",
+            filetypes=[
+                ("osu! and audio", "*.osz *.osu *.mp3 *.ogg *.wav *.flac *.m4a *.aac *.opus"),
+                ("All files", "*.*"),
+            ],
+        )
+        self._add_paths([Path(value) for value in selected])
+
+    def _choose_folder(self) -> None:
+        selected = filedialog.askdirectory(title="Queue a folder")
+        if selected:
+            self._add_paths([Path(selected)])
+
+    def _choose_output_folder(self) -> None:
+        self._choose_directory(self.output_dir, "Choose generated-package folder")
+
+    def _choose_songs_folder(self) -> None:
+        self._choose_directory(self.songs_root, "Choose osu!stable Songs folder")
+
+    def _choose_data_folder(self) -> None:
+        self._choose_directory(self.data_root, "Choose training-data folder")
+
+    def _choose_train_output(self) -> None:
+        self._choose_directory(self.train_output, "Choose model output folder")
+
+    @staticmethod
+    def _choose_directory(variable: tk.StringVar, title: str) -> None:
+        selected = filedialog.askdirectory(title=title, initialdir=variable.get() or None)
+        if selected:
+            variable.set(selected)
+
+    def _accept_drop(self, event: tk.Event) -> None:
+        self._add_paths([Path(value) for value in self.root.tk.splitlist(event.data)])
+
+    def _add_paths(self, paths: list[Path]) -> None:
+        inputs = discover_inputs(paths, all_difficulties=self.all_difficulties.get())
+        existing = {os.path.normcase(str(entry.source)) for entry in self.entries.values()}
+        added = 0
+        for source in inputs:
+            key = os.path.normcase(str(source))
+            if key in existing:
+                continue
+            identifier = self.queue_tree.insert(
+                "", "end", values=(source.name, source.suffix[1:].upper(), "Ready", "—")
+            )
+            self.entries[identifier] = QueueEntry(source=source)
+            existing.add(key)
+            added += 1
+        if not inputs:
+            messagebox.showwarning(
+                "No supported input", "No .osz, .osu, or supported audio files were found."
+            )
+        self.status.set(f"Added {added} item(s) • {len(self.entries)} queued")
+
+    def _remove_selected(self) -> None:
+        if self.busy:
+            messagebox.showinfo("Queue is running", "Stop the active queue before removing items.")
+            return
+        for identifier in self.queue_tree.selection():
+            self.entries.pop(identifier, None)
+            self.queue_tree.delete(identifier)
+        self.status.set(f"{len(self.entries)} item(s) queued")
+
+    def _clear_queue(self) -> None:
+        if self.busy:
+            messagebox.showinfo("Queue is running", "Stop the active queue before clearing it.")
+            return
+        self.entries.clear()
+        self.queue_tree.delete(*self.queue_tree.get_children())
+        self.progress["value"] = 0
+        self.status.set("Queue cleared • ready for another song")
+
+    @staticmethod
+    def _optional_float(value: str, label: str) -> float | None:
+        if not value.strip():
+            return None
+        try:
+            return float(value)
+        except ValueError as exc:
+            raise ValueError(f"{label} must be a number.") from exc
+
+    def _generation_options(self) -> GenerationOptions:
+        try:
+            seed = int(self.seed.get())
+            keys = int(self.keys.get())
+            offset = int(self.offset.get()) if self.offset.get().strip() else None
+        except ValueError as exc:
+            raise ValueError("Seed, offset, and mania keys must be whole numbers.") from exc
+        if not 1 <= keys <= 18:
+            raise ValueError("Mania keys must be between 1 and 18.")
+        threshold = self._optional_float(self.threshold.get(), "Threshold")
+        density = self._optional_float(self.density.get(), "Density")
+        if threshold is not None and not 0 < threshold < 1:
+            raise ValueError("Threshold must be between 0 and 1.")
+        if density is not None and not 0 < density <= 20:
+            raise ValueError("Density must be greater than 0 and at most 20.")
+        model = (
+            Path(self.modern_model.get()).expanduser().resolve()
+            if self.modern_model.get().strip()
+            else None
+        )
+        return GenerationOptions(
+            preset=self.preset.get(),
+            mode=self.mode.get(),
+            seed=seed,
+            flow_engine=self.flow_engine.get(),
+            rhythm_engine=self.rhythm_engine.get(),
+            modern_model=model if self.rhythm_engine.get() == "modern" else None,
+            threshold=threshold,
+            density=density,
+            difficulty=self.difficulty.get().strip() or None,
+            bpm=self._optional_float(self.bpm.get(), "BPM"),
+            offset_ms=offset,
+            key_count=keys,
+            open_in_lazer=self.open_lazer.get(),
+        )
+
+    def _start_queue(self) -> None:
+        if self.busy:
+            return
+        ready = [
+            (identifier, entry)
+            for identifier, entry in self.entries.items()
+            if entry.status in {"Ready", "Failed", "Stopped"}
+        ]
+        if not ready:
+            messagebox.showinfo("Queue is empty", "Add files or a folder before running the queue.")
+            return
+        try:
+            options = self._generation_options()
+        except ValueError as exc:
+            messagebox.showerror("Invalid settings", str(exc))
+            return
+        output_root = Path(self.output_dir.get()).expanduser().resolve()
+        output_root.mkdir(parents=True, exist_ok=True)
+        reserved: set[Path] = set()
+        jobs: list[tuple[str, list[str], Path]] = []
+        for identifier, entry in ready:
+            base = output_root / f"{entry.source.stem}-osumapper-{options.preset}.osz"
+            output = unique_output_path(base, reserved)
+            reserved.add(output)
+            entry.output = output
+            jobs.append((identifier, build_generate_command(entry.source, output, options), output))
+        self._set_busy(True, f"Running {len(jobs)} queued item(s)")
+        threading.Thread(target=self._queue_worker, args=(jobs,), daemon=True).start()
+
+    def _queue_worker(self, jobs: list[tuple[str, list[str], Path]]) -> None:
+        completed = 0
+        for identifier, command, output in jobs:
+            if self.stop_requested:
+                self.events.put(("item", identifier, "Stopped", output))
+                continue
+            self.events.put(("item", identifier, "Running", output))
+            code = self._execute(command, label=f"Generate {Path(command[4]).name}")
+            status = "Completed" if code == 0 else "Stopped" if self.stop_requested else "Failed"
+            self.events.put(("item", identifier, status, output))
+            completed += 1
+            self.events.put(("progress", completed / len(jobs) * 100))
+        self.events.put(("done", "Queue stopped" if self.stop_requested else "Queue finished"))
+
+    def _execute(self, command: list[str], *, label: str) -> int:
+        self.events.put(("log", f"\n▶ {label}\n{subprocess.list2cmdline(command)}\n", "muted"))
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+            )
+            self.active_process = process
+            assert process.stdout is not None
+            for line in process.stdout:
+                self.events.put(("log", line, "error" if "error:" in line.casefold() else None))
+            code = process.wait()
+        except OSError as exc:
+            self.events.put(("log", f"Could not start process: {exc}\n", "error"))
+            code = 1
+        finally:
+            self.active_process = None
+        self.events.put(
+            ("log", f"Process exited with code {code}.\n", "success" if code == 0 else "error")
+        )
+        return code
+
+    def _run_single(self, command: list[str], label: str) -> None:
+        if self.busy:
+            messagebox.showinfo("Process active", "Stop or wait for the active process first.")
+            return
+        self._set_busy(True, label)
+
+        def worker() -> None:
+            code = self._execute(command, label=label)
+            self.events.put(("progress", 100 if code == 0 else 0))
+            self.events.put(("done", f"{label} completed" if code == 0 else f"{label} failed"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _base_command(self) -> list[str]:
+        return [sys.executable, "-m", "osumapper"]
+
+    def _run_dataset_action(self, action: str) -> None:
+        data = self.data_root.get().strip()
+        if not data:
+            messagebox.showerror("Missing data folder", "Choose a training-data folder.")
+            return
+        command = self._base_command() + ["dataset", action]
+        if action == "scan":
+            songs = self.songs_root.get().strip()
+            if not songs:
+                messagebox.showerror("Missing Songs folder", "Choose your osu!stable Songs folder.")
+                return
+            command.append(songs)
+        command.extend(("--data-root", data))
+        if action == "split":
+            command.extend(("--seed", self.seed.get()))
+            if self.include_unrated.get():
+                command.append("--include-unrated")
+        self._run_single(command, f"Dataset {action}")
+
+    def _training_model_root(self) -> str:
+        value = self.train_output.get().strip()
+        if not value:
+            raise ValueError("Choose a model output folder.")
+        return value
+
+    def _train(self) -> None:
+        try:
+            for value, label in (
+                (self.epochs.get(), "Epochs"),
+                (self.batch_size.get(), "Batch size"),
+                (self.sequence_length.get(), "Sequence length"),
+                (self.context_radius.get(), "Audio context"),
+            ):
+                parsed = int(value)
+                if parsed <= 0 and label != "Audio context":
+                    raise ValueError(f"{label} must be positive.")
+                if label == "Audio context" and not 0 <= parsed <= 32:
+                    raise ValueError("Audio context must be between 0 and 32.")
+            if float(self.learning_rate.get()) <= 0:
+                raise ValueError("Learning rate must be positive.")
+            output = self._training_model_root()
+        except ValueError as exc:
+            messagebox.showerror("Invalid training settings", str(exc))
+            return
+        command = self._base_command() + [
+            "train",
+            "rhythm",
+            "--data-root",
+            self.data_root.get(),
+            "--output",
+            output,
+            "--architecture",
+            self.train_architecture.get(),
+            "--epochs",
+            self.epochs.get(),
+            "--batch-size",
+            self.batch_size.get(),
+            "--learning-rate",
+            self.learning_rate.get(),
+            "--sequence-length",
+            self.sequence_length.get(),
+            "--audio-context-radius",
+            self.context_radius.get(),
+            "--device",
+            self.device.get(),
+            "--seed",
+            self.seed.get(),
+        ]
+        if self.resume.get():
+            command.append("--resume")
+        self._run_single(command, f"Train {self.train_architecture.get()}")
+
+    def _calibrate(self) -> None:
+        try:
+            model = self._training_model_root()
+        except ValueError as exc:
+            messagebox.showerror("Missing model", str(exc))
+            return
+        command = self._base_command() + [
+            "train",
+            "calibrate",
+            "rhythm",
+            "--data-root",
+            self.data_root.get(),
+            "--model",
+            model,
+        ]
+        self._run_single(command, "Validation threshold calibration")
+
+    def _evaluate(self) -> None:
+        try:
+            model = self._training_model_root()
+        except ValueError as exc:
+            messagebox.showerror("Missing model", str(exc))
+            return
+        command = self._base_command() + [
+            "train",
+            "evaluate",
+            "rhythm",
+            "--data-root",
+            self.data_root.get(),
+            "--model",
+            model,
+        ]
+        self._run_single(command, "Held-out test evaluation")
+
+    def _review(self) -> None:
+        try:
+            model = self._training_model_root()
+            count = int(self.review_count.get())
+            if count <= 0:
+                raise ValueError("Review count must be positive.")
+        except ValueError as exc:
+            messagebox.showerror("Invalid review settings", str(exc))
+            return
+        output = Path(self.output_dir.get()) / "held-out-review"
+        command = self._base_command() + [
+            "train",
+            "review",
+            "rhythm",
+            "--data-root",
+            self.data_root.get(),
+            "--model",
+            model,
+            "--output",
+            str(output),
+            "--count",
+            str(count),
+            "--seed",
+            self.seed.get(),
+        ]
+        if self.open_lazer.get():
+            command.append("--open")
+        self._run_single(command, "Generate held-out review packages")
+
+    def _set_busy(self, busy: bool, status: str) -> None:
+        self.busy = busy
+        self.stop_requested = False if busy else self.stop_requested
+        self.generate_button.configure(state="disabled" if busy else "normal")
+        self.train_button.configure(state="disabled" if busy else "normal")
+        self.stop_button.configure(state="normal" if busy else "disabled")
+        self.status.set(status)
+        if busy:
+            self.progress["value"] = 0
+
+    def _stop(self) -> None:
+        if not self.busy:
+            return
+        self.stop_requested = True
+        self.status.set("Stopping active process…")
+        process = self.active_process
+        if process is not None and process.poll() is None:
+            process.terminate()
+
+    def _append_log(self, text: str, tag: str | None = None) -> None:
+        self.log.configure(state="normal")
+        self.log.insert("end", text, tag or ())
+        self.log.see("end")
+        self.log.configure(state="disabled")
+
+    def _clear_log(self) -> None:
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+
+    def _open_output_folder(self) -> None:
+        output = Path(self.output_dir.get()).expanduser().resolve()
+        output.mkdir(parents=True, exist_ok=True)
+        if os.name == "nt":
+            os.startfile(output)  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", str(output)])
+
+    def _poll(self) -> None:
+        try:
+            while True:
+                event = self.events.get_nowait()
+                kind = event[0]
+                if kind == "log":
+                    self._append_log(event[1], event[2])
+                elif kind == "item":
+                    _, identifier, status, output = event
+                    entry = self.entries.get(identifier)
+                    if entry is not None:
+                        entry.status = status
+                        entry.output = output
+                        self.queue_tree.set(identifier, "status", status)
+                        self.queue_tree.set(identifier, "output", Path(output).name)
+                elif kind == "progress":
+                    self.progress["value"] = event[1]
+                elif kind == "done":
+                    self._set_busy(False, event[1])
+        except queue.Empty:
+            pass
+        self.root.after(100, self._poll)
+
+    def _close(self) -> None:
+        process = self.active_process
+        if process is not None and process.poll() is None:
+            if not messagebox.askyesno("Process active", "Stop the active process and close?"):
+                return
+            process.terminate()
+        self.root.destroy()
 
 
 def launch() -> None:
     root = TkinterDnD.Tk()
-    root.title("osumapper for osu!lazer")
-    root.geometry("720x500")
-    root.minsize(620, 410)
-
-    source = tk.StringVar()
-    output = tk.StringVar()
-    preset = tk.StringVar(value="default")
-    seed = tk.StringVar(value="2026")
-    should_open = tk.BooleanVar(value=True)
-    messages: queue.Queue[str] = queue.Queue()
-
-    frame = ttk.Frame(root, padding=16)
-    frame.pack(fill="both", expand=True)
-    frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(6, weight=1)
-
-    def set_source(path: Path) -> None:
-        path = path.expanduser().resolve()
-        if path.suffix.casefold() not in SUPPORTED_INPUTS:
-            messagebox.showerror(
-                "Unsupported input",
-                "Drop an .osz, .osu, or supported audio file.",
-            )
-            return
-        source.set(str(path))
-        if not output.get():
-            output.set(str(Path.cwd() / "output" / f"{path.stem}-osumapper.osz"))
-
-    def accept_drop(event: tk.Event) -> None:
-        dropped = root.tk.splitlist(event.data)
-        if dropped:
-            set_source(Path(dropped[0]))
-
-    def choose_source() -> None:
-        selected = filedialog.askopenfilename(
-            title="Choose .osz, .osu, or audio",
-            filetypes=[
-                (
-                    "osu! and audio",
-                    "*.osz *.osu *.mp3 *.ogg *.wav *.flac *.m4a *.aac *.opus",
-                ),
-                ("All files", "*.*"),
-            ],
-        )
-        if selected:
-            set_source(Path(selected))
-
-    def choose_output() -> None:
-        selected = filedialog.asksaveasfilename(
-            title="Save generated package",
-            defaultextension=".osz",
-            filetypes=[("osu! package", "*.osz")],
-        )
-        if selected:
-            output.set(selected)
-
-    drop_zone = ttk.Label(
-        frame,
-        text="Drop an .osz, .osu, or audio file here\n(or use Browse)",
-        anchor="center",
-        relief="groove",
-        padding=14,
-    )
-    drop_zone.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 10))
-
-    ttk.Label(frame, text="Input").grid(row=1, column=0, sticky="w", pady=4)
-    input_entry = ttk.Entry(frame, textvariable=source)
-    input_entry.grid(row=1, column=1, sticky="ew", padx=8)
-    ttk.Button(frame, text="Browse...", command=choose_source).grid(row=1, column=2)
-    ttk.Label(frame, text="Output").grid(row=2, column=0, sticky="w", pady=4)
-    ttk.Entry(frame, textvariable=output).grid(row=2, column=1, sticky="ew", padx=8)
-    ttk.Button(frame, text="Browse...", command=choose_output).grid(row=2, column=2)
-    ttk.Label(frame, text="Preset").grid(row=3, column=0, sticky="w", pady=4)
-    ttk.Combobox(frame, textvariable=preset, values=preset_names(), state="readonly").grid(
-        row=3, column=1, sticky="w", padx=8
-    )
-    ttk.Label(frame, text="Seed").grid(row=4, column=0, sticky="w", pady=4)
-    ttk.Entry(frame, textvariable=seed, width=14).grid(row=4, column=1, sticky="w", padx=8)
-    ttk.Checkbutton(frame, text="Open in osu!lazer when finished", variable=should_open).grid(
-        row=5, column=1, sticky="w", padx=8, pady=4
-    )
-    log = tk.Text(frame, height=12, state="disabled", wrap="word")
-    log.grid(row=6, column=0, columnspan=3, sticky="nsew", pady=(12, 8))
-
-    for target in (root, drop_zone, input_entry):
-        target.drop_target_register(DND_FILES)
-        target.dnd_bind("<<Drop>>", accept_drop)
-
-    def append_log(text: str) -> None:
-        log.configure(state="normal")
-        log.insert("end", text)
-        log.see("end")
-        log.configure(state="disabled")
-
-    def worker(command: list[str]) -> None:
-        process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-        )
-        assert process.stdout is not None
-        for line in process.stdout:
-            messages.put(line)
-        messages.put(f"\nProcess finished with exit code {process.wait()}.\n")
-        messages.put("__DONE__")
-
-    def start() -> None:
-        if not source.get() or not output.get():
-            messagebox.showerror("Missing input", "Choose an input and output file first.")
-            return
-        try:
-            int(seed.get())
-        except ValueError:
-            messagebox.showerror("Invalid seed", "Seed must be an integer.")
-            return
-        command = [
-            sys.executable,
-            "-m",
-            "osumapper",
-            "generate",
-            source.get(),
-            "--output",
-            output.get(),
-            "--preset",
-            preset.get(),
-            "--seed",
-            seed.get(),
-        ]
-        if should_open.get():
-            command.append("--open")
-        run_button.configure(state="disabled")
-        append_log(f"Running: {' '.join(command)}\n\n")
-        threading.Thread(target=worker, args=(command,), daemon=True).start()
-
-    def poll() -> None:
-        try:
-            while True:
-                message = messages.get_nowait()
-                if message == "__DONE__":
-                    run_button.configure(state="normal")
-                else:
-                    append_log(message)
-        except queue.Empty:
-            pass
-        root.after(100, poll)
-
-    run_button = ttk.Button(frame, text="Generate beatmap", command=start)
-    run_button.grid(row=7, column=0, columnspan=3, pady=(4, 0))
-    poll()
+    OsumapperStudio(root)
     root.mainloop()

@@ -1,0 +1,44 @@
+{
+  "architecture": "conv_audio_encoder_transformer",
+  "audio_dimension": 132,
+  "audio_features": {
+    "fmax": 11025.0,
+    "fmin": 20.0,
+    "hop_length": 512,
+    "n_fft": 2048,
+    "n_mels": 128,
+    "sample_rate": 22050
+  },
+  "class_weight_positive": 9.185554433671282,
+  "difficulty_features": [
+    "OD",
+    "AR",
+    "CS",
+    "objects_per_second"
+  ],
+  "grid": {
+    "hit_tolerance_ms": 32.0,
+    "prediction_threshold": 0.5,
+    "sequence_length": 256,
+    "subdivisions": [
+      1,
+      2,
+      3,
+      4,
+      6,
+      8
+    ]
+  },
+  "grid_dimension": 6,
+  "model_version": 1,
+  "training": {
+    "batch_size": 16,
+    "device": "auto",
+    "epochs": 50,
+    "include_unrated": false,
+    "learning_rate": 0.001,
+    "prediction_threshold": 0.5,
+    "seed": 2026,
+    "sequence_length": 256
+  }
+}

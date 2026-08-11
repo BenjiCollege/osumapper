@@ -25,13 +25,17 @@ baseline and compatibility policy.
 - Safe `.osz` extraction into isolated temporary directories.
 - Complete, deterministic `.osz` export and optional opening in osu!lazer.
 - Standard, taiko, catch, and mania generation paths.
-- A local drag-and-drop/file-picker interface.
+- A professional local queue UI with multi-file/folder drag-and-drop, training
+  controls, progress, retry/clear actions, and per-package Lazer import.
 - Cross-platform timing estimation using librosa instead of `TimingAnlyz.exe`.
 - Pure-Python beatmap conversion in the modern path instead of Node.js.
 - Typed configuration, `pathlib`, checked subprocesses, progress output, and
   actionable errors.
 - Fourteen migrated `.keras` rhythm models with deterministic prediction-parity
   manifests.
+- An opt-in local osu!standard dataset, feature extraction, Transformer-v1 and
+  Conformer-v2 training, validation-only calibration, held-out evaluation, and
+  deterministic human-review packages.
 - Representative fixtures, golden-output tests, safe-archive tests, and
   cross-ruleset smoke coverage.
 
@@ -140,10 +144,22 @@ Start the local interface with:
 uv run osumapper ui
 ```
 
-Drop an `.osz`, `.osu`, or supported audio file onto the window, or use the file
-picker. Select a preset and seed, choose whether to open the result in osu!lazer,
-and press **Generate beatmap**. Progress and diagnostic messages appear in the
-window.
+The **Generate queue** tab accepts individual `.osz`, `.osu`, and audio files, any
+combination of multiple files, or whole folders. Folder scanning queues one
+representative difficulty per beatmap folder by default; enable **Every
+difficulty** to queue all `.osu` files. Duplicate paths are ignored and existing
+output names receive a safe numeric suffix instead of being overwritten.
+
+Use **Clear queue** when you are ready for another song. The queue shows each
+item's state and output, can be stopped, and can retry failed or stopped items.
+Generation controls expose the preset, ruleset, seed, flow/rhythm engines, modern
+model, validation-calibrated threshold override, density, difficulty, BPM,
+offset, and mania keys. **Import each completed package into osu!lazer** opens
+every successful `.osz` as it finishes.
+
+The **Training lab** tab provides the same scan, statistics, split, feature,
+training, calibration, held-out evaluation, and review-package commands described
+below. The **Activity** tab keeps detailed process output and actionable errors.
 
 ## Presets and rulesets
 
@@ -174,6 +190,11 @@ The most useful `generate` options are:
 | `--mode MODE` | Select `standard`, `taiko`, `catch`, or `mania`. |
 | `--difficulty TEXT` | Select a difficulty from a multi-map `.osz`. |
 | `--seed INTEGER` | Set the deterministic seed; the default is `2026`. |
+| `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
+| `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |
+| `--modern-model PATH` | Select a modern model directory or `.keras` file. |
+| `--rhythm-threshold NUMBER` | Override the modern model's hit-probability threshold. |
+| `--target-density NUMBER` | Cap modern output at a target number of objects per second. |
 | `--flow-engine auto` | Use the compatible legacy flow model when available. |
 | `--flow-engine legacy` | Require the legacy per-map flow model. |
 | `--flow-engine deterministic` | Use the fast, seeded cross-platform flow implementation. |
@@ -208,11 +229,208 @@ Lazer storage and does not require the Windows registry or `osu!.db`:
 uv run osumapper stable-scan "C:\osu!" --mode standard --output maplist.txt
 ```
 
+## Training a modern rhythm model locally
+
+The modern rhythm engine is an **opt-in, osu!standard-only experiment**. No
+pretrained modern model is shipped, and the legacy rhythm engine remains the
+default. Training output is stored under ignored local directories so it cannot
+replace the original models accidentally. A low training loss is not evidence of
+beatmap quality; use the held-out test-song evaluation and human review before
+drawing conclusions.
+
+The default workspace is `training_data/`. You may place it elsewhere by passing
+the same `--data-root PATH` to every dataset, training, evaluation, and analysis
+command. Audio is read from your Songs directory and cached as numerical features;
+the source audio and beatmaps are not copied or modified.
+
+### 1. Scan and curate a local dataset
+
+Point the scanner at an osu!stable-style Songs directory. Malformed maps, missing
+audio, converted maps, duplicates, and maps outside the configured quality bounds
+are recorded in `training_data/skipped.jsonl` instead of stopping the scan.
+
+```powershell
+uv run osumapper dataset scan "E:\Games\osu!\Songs"
+uv run osumapper dataset stats
+```
+
+The scanner writes scalar metadata to `training_data/dataset.parquet` and detailed
+per-map timing/object data under `training_data/maps/`. It supports UTF-8 and
+common legacy encodings, inherited timing points, timing changes, sliders,
+spinners, hitsounds, and the standard mapping statistics used by preprocessing.
+
+Review maps and label them explicitly. Unrated maps are not assumed to be good:
+
+```powershell
+uv run osumapper dataset rate "E:\Games\osu!\Songs\123 Artist - Song\map.osu" good
+uv run osumapper dataset rate "E:\Games\osu!\Songs\456 Artist - Song\map.osu" bad
+uv run osumapper dataset rate "E:\Games\osu!\Songs\789 Artist - Song\map.osu" ignore
+```
+
+Ratings persist in `training_data/ratings.json` and update the current Parquet
+index. By default, only maps marked `good` are eligible for training. Use
+`dataset split --include-unrated` only when you deliberately want unrated maps.
+
+### 2. Split songs and cache features
+
+```powershell
+uv run osumapper dataset split --seed 2026
+uv run osumapper dataset features
+```
+
+The split is deterministic and groups every difficulty from the same song/mapset
+together, preventing song leakage across the 80% training, 10% validation, and
+10% test partitions. The manifest includes the dataset hash and refuses stale
+splits after the dataset changes.
+
+Feature extraction uses 22.05 kHz audio by default and caches normalized
+log-mel, onset-strength, RMS-energy, spectral-flux, and beat-pulse arrays with
+their exact frame timestamps. Cache keys include audio content and feature
+configuration. Candidate hit positions are built from the map timing grid at
+1/1, 1/2, 1/3, 1/4, 1/6, and 1/8 subdivisions; each human object is matched to at
+most one candidate within the configured tolerance.
+
+### 3. Preserve Transformer-v1 and train Conformer-v2
+
+```powershell
+uv run osumapper train rhythm --architecture transformer-v1 --epochs 50 --batch-size 16 --seed 2026 --device auto
+```
+
+Transformer-v1 combines a small Conv1D audio encoder with timing-grid and
+difficulty features, then applies three Transformer attention blocks to predict
+`P(hit)` for each candidate position. Positive-class weighting handles sparse
+labels. Training uses only training and validation partitions and writes the best
+checkpoint, a last-epoch resume checkpoint, deployment model, per-epoch state,
+configuration, history, dataset manifest, TensorBoard logs, and CSV logs to
+`models/modern/rhythm/`.
+
+The project now also provides Conformer-v2. It adds local depthwise convolution
+to global self-attention and uses a nine-frame audio context around every musical
+grid candidate. Its default output is deliberately separate, so it cannot
+overwrite Transformer-v1:
+
+```powershell
+uv run osumapper train rhythm --architecture conformer-v2 --sequence-length 512 --audio-context-radius 4 --epochs 50 --batch-size 16 --seed 2026 --device auto --output models/modern/rhythm-conformer-v2
+```
+
+Both architectures use the exact existing song-level split manifest. Compare
+them only when the dataset hash and train/validation/test assignments match.
+
+To continue an interrupted run with the same architecture, context radius, split,
+and output directory:
+
+```powershell
+uv run osumapper train rhythm --resume --epochs 50 --seed 2026
+```
+
+Do not resume a model merely to increase its recorded epoch count. Each epoch is
+now regression-tested to contain non-zero training and validation work. Historical
+runs affected by the former alternating empty-epoch bug should remain snapshots;
+start a clean corrected run in a new output directory.
+
+`--device auto` selects an available GPU and otherwise uses CPU. You can require
+one explicitly with `--device gpu` or `--device cpu`. TensorFlow training can need
+substantial memory and time on a large collection.
+
+### 4. Calibrate on validation, then evaluate once on unseen songs
+
+Choose the operating threshold without looking at test songs:
+
+```powershell
+uv run osumapper train calibrate rhythm --model models/modern/rhythm
+```
+
+The command maximizes candidate-level F1 using validation songs only, breaks ties
+toward the higher/safer threshold, writes `threshold_calibration.json`, and makes
+generation, analysis, and evaluation use that threshold by default. An explicit
+`--threshold` or `--rhythm-threshold` still overrides it.
+
+```powershell
+uv run osumapper train evaluate rhythm
+```
+
+Evaluation is hard-wired to the held-out test partition. It reports precision,
+recall, F1, PR-AUC, matched-event timing error, and density error. Treat these as
+comparative diagnostics, not proof that a generated map is enjoyable or rankable.
+The command refuses a dataset/split manifest that differs from the one recorded
+during training, so the reported test songs cannot silently overlap the run's
+training or validation songs.
+
+Create real packages from a deterministic sample of held-out songs for human
+review in the osu! editor:
+
+```powershell
+uv run osumapper train review rhythm --count 5 --seed 2026 --output output/held-out-review
+```
+
+The review selector samples distinct test songs and chooses a median-density
+difficulty from each selected set. It writes complete `.osz` packages plus a
+`review_manifest.json`. Add `--open` only when you want each package imported into
+osu!lazer immediately.
+
+### Current Transformer-v1 baseline
+
+The first completed local baseline is preserved under
+`models/modern/baselines/transformer-v1-seed-2026-unrated-50-recorded-26-effective/`.
+It recorded 50 history rows but only 26 non-empty epochs because of the corrected
+finite-dataset exhaustion bug. It also used unrated maps. Therefore its results
+demonstrate learning, not mapping quality, and the snapshot must not be resumed.
+
+At threshold `0.5`, held-out F1 was `0.7038`, precision `0.5705`, and mean density
+error `1.835 objects/sec`. Validation-only calibration selected threshold
+`0.806874`; on the unchanged held-out test songs this improved F1 to `0.7368`,
+precision to `0.6808`, mean timing error to `0.514 ms`, and mean density error to
+`0.692 objects/sec`. PR-AUC remained `0.7898`, as expected because calibration
+changes the decision threshold rather than probability ranking.
+
+Five deterministic review packages from this baseline are available locally at
+`output/held-out-review-transformer-v1/` with their exact source-map manifest.
+
+### Recommended research order
+
+For meaningful quality gains, curate and rate maps before scaling model size.
+Train a rated-only Conformer-v2 on the unchanged seed-2026 split, calibrate on
+validation songs, and compare the same test metrics and review-song rubric against
+Transformer-v1. Review timing, rhythm choice, density, pattern readability,
+spacing, and playability separately; one aggregate score can hide regressions.
+
+After that comparison, the highest-value extensions are difficulty-conditioned
+thresholds/density, per-song sampling so large mapsets cannot dominate, continuous
+audio-frame prediction before timing-grid projection, and an optional maintained
+beat/downbeat front end. On Windows, use TensorFlow through WSL2 for RTX GPU
+training; native Windows TensorFlow remains CPU-only in this tested setup. Keep
+third-party audio encoders optional until their license permits the way you intend
+to distribute the resulting model.
+
+Inspect one human map against the model and export a timestamp-by-timestamp JSON
+and CSV timeline:
+
+```powershell
+uv run osumapper analyze "E:\Games\osu!\Songs\123 Artist - Song\map.osu" --format both
+```
+
+The report includes human hits, predicted hits, matched/missed/extra events, timing
+error, beat position, onset strength, and prediction probability.
+
+### 5. Generate with the trained model
+
+```powershell
+uv run osumapper generate song.osz --rhythm-engine modern --flow-engine deterministic --open
+```
+
+The modern engine predicts osu!standard timestamps, then passes them through the
+existing placement, metadata, validation, packaging, and Lazer-import boundary.
+Use `--modern-model PATH` for a non-default model, `--rhythm-threshold` to adjust
+selection, and `--target-density` to cap objects per second. It exits with an
+actionable error if the model selects no usable events. Omit `--rhythm-engine
+modern` to retain the original behavior.
+
 ## Model migration and verification
 
 The repository contains the fourteen original extensionless Keras/HDF5 rhythm
-models and parity-checked `.keras` replacements. Normal generation uses the modern
-models; migration is not part of routine setup.
+models and parity-checked `.keras` replacements. The default legacy rhythm engine
+uses these compatibility copies; they are separate from a locally trained modern
+rhythm model, and migration is not part of routine setup.
 
 Verify the tracked models and parity-manifest hashes:
 
@@ -289,6 +507,19 @@ historical graph. Use `--flow-engine deterministic` to avoid per-map legacy GAN
 training. Model hash and prediction parity can be checked with
 `uv run osumapper models verify`.
 
+### Dataset splitting reports no eligible maps
+
+The default split accepts only maps you explicitly rated `good`. Run
+`dataset stats`, label reviewed maps with `dataset rate`, and split again. The
+`--include-unrated` option is available for intentional exploratory training.
+
+### Modern generation selects no events
+
+First confirm that training completed and held-out evaluation produced sensible
+results. Then inspect the map with `osumapper analyze`; if appropriate, retry with
+a lower `--rhythm-threshold`. Very low thresholds can create excessive or
+musically poor output, so review the result in the osu! editor.
+
 ## Development
 
 Create the locked environment and run all checks:
@@ -304,17 +535,23 @@ uv run osumapper models verify
 The fixture suite covers standard, taiko, catch, and mania. Tests include Unicode
 metadata, negative offsets, safe archive extraction, deterministic package bytes,
 22.05 kHz audio feature dimensions, golden hit-object output, preset selection,
-and model-parity manifests.
+model-parity manifests, malformed training maps, song-level split isolation,
+feature-cache determinism, timing-grid alignment, a CPU training smoke run, model
+reload, held-out evaluation, analysis output, and modern-engine generation.
 
 Project layout:
 
 ```text
-src/osumapper/     Modern application package
-models/            Migrated .keras models and parity manifests
-tests/             Fixtures, golden outputs, and regression tests
-legacy/            Preservation and compatibility documentation
-v6.2/              Untouched historical v6.2 implementation
-v7.0/              Untouched historical v7.0 implementation
+src/osumapper/           Modern application package
+src/osumapper/training/  Local dataset, preprocessing, model, and evaluation code
+models/                  Migrated legacy .keras models and parity manifests
+models/modern/rhythm/    Ignored local modern-model output after training
+models/modern/rhythm-conformer-v2/  Separate ignored Conformer-v2 output
+training_data/           Ignored local metadata, splits, and feature cache
+tests/                   Fixtures, golden outputs, and regression tests
+legacy/                  Preservation and compatibility documentation
+v6.2/                    Untouched historical v6.2 implementation
+v7.0/                    Untouched historical v7.0 implementation
 ```
 
 ## Credits and project lineage

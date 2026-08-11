@@ -44,6 +44,10 @@ class GenerationConfig:
     output: Path | None = None
     open_in_lazer: bool = False
     flow_engine: str = "auto"
+    rhythm_engine: str = "legacy"
+    modern_model: Path | None = None
+    rhythm_threshold: float | None = None
+    target_density: float | None = None
 
 
 def configure_determinism(seed: int) -> None:

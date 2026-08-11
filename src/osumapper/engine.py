@@ -208,8 +208,19 @@ def _standard_objects(
         progress("Predicting rhythm")
         predicted = rhythm.step5_predict_notes(model, prepared, preset.rhythm_params)
         converted = rhythm.step5_convert_sliders(predicted, preset.rhythm_params)
-        rhythm.step5_save_predictions(converted)
+    return _place_standard_objects(workspace, preset, config, progress, converted)
 
+
+def _place_standard_objects(
+    workspace: Path,
+    preset: PresetSpec,
+    config: GenerationConfig,
+    progress: Progress,
+    converted: tuple[Any, ...],
+) -> list[dict[str, Any]]:
+    with _legacy_context(workspace):
+        rhythm = importlib.import_module("act_rhythm_calc")
+        rhythm.step5_save_predictions(converted)
         flow_result: tuple[Any, tuple[Any, ...]] | None = None
         if config.flow_engine in {"auto", "legacy"}:
             try:
@@ -253,6 +264,47 @@ def _standard_objects(
         return objects
 
 
+def _modern_converted(
+    document: BeatmapDocument, timestamps: Any, preset: PresetSpec
+) -> tuple[Any, ...]:
+    np, _ = _require_audio_stack()
+    values = np.asarray(timestamps, dtype=int)
+    timing = document.timing_points()
+    ticks: list[int] = []
+    for timestamp in values:
+        active = timing["uts"][0]
+        for point in timing["uts"]:
+            if timestamp >= point["beginTime"]:
+                active = point
+            else:
+                break
+        ticks.append(int(round((timestamp - active["beginTime"]) / active["tickLength"] * 4)))
+    count = len(values)
+    predictions = np.zeros((count, 5), dtype=float)
+    predictions[:, 0] = 1.0
+    predictions[:, 1] = 1.0
+    objects = np.ones(count, dtype=int)
+    flags = np.zeros(count, dtype=int)
+    slider_velocity = np.asarray(
+        [_slider_length_at(timing["ts"], float(timestamp)) for timestamp in values],
+        dtype=float,
+    )
+    slider_ticks = np.zeros(count, dtype=int)
+    distance_multiplier = float(preset.rhythm_params[0])
+    return (
+        objects,
+        predictions,
+        np.asarray(ticks, dtype=int),
+        values,
+        flags.copy(),
+        flags.copy(),
+        flags.copy(),
+        slider_velocity,
+        slider_ticks,
+        distance_multiplier,
+    )
+
+
 def _mania_objects(
     workspace: Path,
     preset: PresetSpec,
@@ -286,16 +338,37 @@ def generate_document(
         produced = preset.mode.name.lower()
         requested = config.mode.name.lower()
         raise InputError(f"Preset {preset.name} produces {produced}, not {requested}.")
-    progress("Preparing audio features")
     (workspace / "mapthis.json").write_text(
         json.dumps(document.legacy_dict(), ensure_ascii=False), encoding="utf-8"
     )
-    _prepare_model_input(document, audio, workspace / "mapthis.npz")
-    if preset.mode is GameMode.MANIA:
-        objects = _mania_objects(workspace, preset, progress)
+    if config.rhythm_engine == "modern":
+        if preset.mode is not GameMode.STANDARD:
+            raise InputError("The modern rhythm model currently supports osu!standard only.")
+        from osumapper.training.inference import predict_modern_rhythm
+
+        prediction = predict_modern_rhythm(
+            document,
+            audio,
+            workspace,
+            model_root=config.modern_model,
+            threshold=config.rhythm_threshold,
+            target_density=config.target_density,
+            progress=progress,
+        )
+        progress(f"Modern rhythm selected {len(prediction.timestamps_ms)} timestamps")
+        converted = _modern_converted(document, prediction.timestamps_ms, preset)
+        objects = _place_standard_objects(workspace, preset, config, progress, converted)
     else:
-        objects = _standard_objects(workspace, preset, config, progress)
+        progress("Preparing legacy rhythm audio features")
+        _prepare_model_input(document, audio, workspace / "mapthis.npz")
+        if preset.mode is GameMode.MANIA:
+            objects = _mania_objects(workspace, preset, progress)
+        else:
+            objects = _standard_objects(workspace, preset, config, progress)
     if not objects:
         raise GenerationError("The model did not produce any hit objects.")
     progress(f"Serializing {len(objects)} hit objects")
-    return document.with_hit_objects(objects, preset=preset.name, seed=config.seed)
+    preset_label = (
+        f"{preset.name}-modern-rhythm" if config.rhythm_engine == "modern" else preset.name
+    )
+    return document.with_hit_objects(objects, preset=preset_label, seed=config.seed)

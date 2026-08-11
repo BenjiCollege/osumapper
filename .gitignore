@@ -68,6 +68,12 @@ dist/
 
 # generated modern artifacts
 output/
+training_data/
+models/modern/*
+!models/modern/baselines/
+models/modern/baselines/*
+!models/modern/baselines/transformer-v1-seed-2026-unrated-50-recorded-26-effective/
+!models/modern/baselines/transformer-v1-seed-2026-unrated-50-recorded-26-effective/**
 
 # local reference files
 full_maplist.txt

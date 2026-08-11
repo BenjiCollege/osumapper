@@ -14,10 +14,9 @@ from osumapper import (
     __original_project__,
     __version__,
 )
-from osumapper.config import GameMode, GenerationConfig
-from osumapper.engine import generate_document
+from osumapper.config import GameMode
 from osumapper.errors import OsumapperError
-from osumapper.lazer import find_lazer_executable, open_in_lazer
+from osumapper.lazer import find_lazer_executable
 from osumapper.models import (
     legacy_model_paths,
     migrate_all,
@@ -25,11 +24,23 @@ from osumapper.models import (
     verify_all,
     verify_model,
 )
-from osumapper.package import generated_map_name, write_osz
 from osumapper.paths import project_root
-from osumapper.presets import get_preset, preset_names
+from osumapper.pipeline import GenerationRequest, generate_package
+from osumapper.presets import preset_names
 from osumapper.stable import scan_stable_maps, write_maplist
-from osumapper.workspace import SUPPORTED_AUDIO, prepare_source
+from osumapper.training.analysis import analyze_map
+from osumapper.training.calibration import calibrate_threshold
+from osumapper.training.config import (
+    AudioFeatureConfig,
+    QualityConfig,
+    RhythmTrainingConfig,
+)
+from osumapper.training.dataset import dataset_statistics, rate_map, scan_dataset
+from osumapper.training.evaluation import evaluate_rhythm
+from osumapper.training.features import extract_dataset_features
+from osumapper.training.review import generate_review_packages
+from osumapper.training.splits import split_dataset
+from osumapper.training.trainer import train_rhythm
 
 
 class ConsoleProgress:
@@ -73,6 +84,14 @@ def _build_parser() -> argparse.ArgumentParser:
     generate.add_argument(
         "--flow-engine", choices=("auto", "legacy", "deterministic"), default="auto"
     )
+    generate.add_argument("--rhythm-engine", choices=("legacy", "modern"), default="legacy")
+    generate.add_argument(
+        "--modern-model", type=Path, help="modern rhythm model directory or .keras file"
+    )
+    generate.add_argument("--rhythm-threshold", type=float, help="modern hit-probability threshold")
+    generate.add_argument(
+        "--target-density", type=float, help="target objects per second for modern rhythm"
+    )
     generate.add_argument("--bpm", type=float, help="tempo for audio-only input")
     generate.add_argument("--offset", type=int, help="timing offset in milliseconds")
     generate.add_argument(
@@ -85,6 +104,111 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("presets", help="list generation presets")
     subparsers.add_parser("ui", help="open the local drag-and-drop interface")
     subparsers.add_parser("credits", help="show original-project attribution")
+
+    dataset = subparsers.add_parser("dataset", help="build and manage local training data")
+    dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
+    dataset_scan = dataset_sub.add_parser(
+        "scan", help="scan an osu!stable Songs directory for standard maps"
+    )
+    dataset_scan.add_argument("songs_root", type=Path)
+    dataset_scan.add_argument("--data-root", type=Path)
+    dataset_scan.add_argument("--min-objects", type=int, default=25)
+    dataset_scan.add_argument("--min-duration-ms", type=int, default=5_000)
+    dataset_scan.add_argument("--max-duration-ms", type=int, default=30 * 60 * 1_000)
+    dataset_scan.add_argument("--min-bpm", type=float, default=20.0)
+    dataset_scan.add_argument("--max-bpm", type=float, default=1_000.0)
+    dataset_scan.add_argument("--allow-converted", action="store_true")
+
+    dataset_stats = dataset_sub.add_parser("stats", help="summarize the local dataset")
+    dataset_stats.add_argument("--data-root", type=Path)
+
+    dataset_rate = dataset_sub.add_parser("rate", help="manually rate a beatmap")
+    dataset_rate.add_argument("map", type=Path)
+    dataset_rate.add_argument("rating", choices=("good", "bad", "ignore"))
+    dataset_rate.add_argument("--data-root", type=Path)
+
+    dataset_split = dataset_sub.add_parser(
+        "split", help="create deterministic song-level train/validation/test splits"
+    )
+    dataset_split.add_argument("--data-root", type=Path)
+    dataset_split.add_argument("--seed", type=int, default=2026)
+    dataset_split.add_argument("--train-ratio", type=float, default=0.8)
+    dataset_split.add_argument("--validation-ratio", type=float, default=0.1)
+    dataset_split.add_argument("--test-ratio", type=float, default=0.1)
+    dataset_split.add_argument("--include-unrated", action="store_true")
+
+    dataset_features = dataset_sub.add_parser(
+        "features", help="extract and cache deterministic per-song audio features"
+    )
+    dataset_features.add_argument("--data-root", type=Path)
+    dataset_features.add_argument("--sample-rate", type=int, default=22_050)
+    dataset_features.add_argument("--hop-length", type=int, default=512)
+    dataset_features.add_argument("--n-fft", type=int, default=2_048)
+    dataset_features.add_argument("--n-mels", type=int, default=128)
+    dataset_features.add_argument("--force", action="store_true")
+
+    train = subparsers.add_parser("train", help="train or evaluate modern local models")
+    train_sub = train.add_subparsers(dest="train_command", required=True)
+    train_rhythm_parser = train_sub.add_parser("rhythm", help="train the modern rhythm model")
+    train_rhythm_parser.add_argument("--data-root", type=Path)
+    train_rhythm_parser.add_argument("--epochs", type=int, default=50)
+    train_rhythm_parser.add_argument("--batch-size", type=int, default=16)
+    train_rhythm_parser.add_argument("--learning-rate", type=float, default=1e-3)
+    train_rhythm_parser.add_argument("--seed", type=int, default=2026)
+    train_rhythm_parser.add_argument("--resume", action="store_true")
+    train_rhythm_parser.add_argument("--device", choices=("auto", "cpu", "gpu"), default="auto")
+    train_rhythm_parser.add_argument("--output", type=Path)
+    train_rhythm_parser.add_argument("--sequence-length", type=int, default=256)
+    train_rhythm_parser.add_argument("--threshold", type=float, default=0.5)
+    train_rhythm_parser.add_argument(
+        "--architecture",
+        choices=("transformer-v1", "conformer-v2"),
+        default="transformer-v1",
+    )
+    train_rhythm_parser.add_argument(
+        "--audio-context-radius",
+        type=int,
+        help="feature frames on each side (default: 0 for v1, 4 for Conformer-v2)",
+    )
+
+    train_evaluate = train_sub.add_parser(
+        "evaluate", help="evaluate a model against held-out test songs only"
+    )
+    train_evaluate.add_argument("model_kind", choices=("rhythm",))
+    train_evaluate.add_argument("--data-root", type=Path)
+    train_evaluate.add_argument("--model", type=Path)
+    train_evaluate.add_argument("--threshold", type=float)
+    train_evaluate.add_argument("--output", type=Path)
+
+    train_calibrate = train_sub.add_parser(
+        "calibrate", help="select a prediction threshold using validation songs only"
+    )
+    train_calibrate.add_argument("model_kind", choices=("rhythm",))
+    train_calibrate.add_argument("--data-root", type=Path)
+    train_calibrate.add_argument("--model", type=Path)
+    train_calibrate.add_argument("--output", type=Path)
+
+    train_review = train_sub.add_parser(
+        "review", help="generate deterministic packages from held-out test songs"
+    )
+    train_review.add_argument("model_kind", choices=("rhythm",))
+    train_review.add_argument("--data-root", type=Path)
+    train_review.add_argument("--model", type=Path)
+    train_review.add_argument("--output", type=Path)
+    train_review.add_argument("--count", type=int, default=5)
+    train_review.add_argument("--seed", type=int, default=2026)
+    train_review.add_argument("--threshold", type=float)
+    train_review.add_argument("--open", action="store_true", dest="open_in_lazer")
+
+    analyze = subparsers.add_parser(
+        "analyze", help="compare one human standard map with the modern rhythm model"
+    )
+    analyze.add_argument("map", type=Path)
+    analyze.add_argument("--model", type=Path)
+    analyze.add_argument("--data-root", type=Path)
+    analyze.add_argument("--threshold", type=float)
+    analyze.add_argument("--output", type=Path)
+    analyze.add_argument("--format", choices=("json", "csv", "both"), default="json")
 
     models = subparsers.add_parser("models", help="migrate or verify legacy rhythm models")
     models_sub = models.add_subparsers(dest="models_command", required=True)
@@ -116,51 +240,27 @@ def _generate(args: argparse.Namespace) -> int:
     progress = ConsoleProgress(args.quiet)
     source_path = args.source.expanduser().resolve()
     output = (args.output or _default_output(source_path, args.preset)).expanduser().resolve()
-    if output == source_path:
-        raise OsumapperError("Output must not overwrite the input package.")
-    config = GenerationConfig(
-        preset=args.preset,
-        mode=args.mode,
-        seed=args.seed,
-        difficulty=args.difficulty,
-        output=output,
-        open_in_lazer=args.open_in_lazer,
-        flow_engine=args.flow_engine,
+    generate_package(
+        GenerationRequest(
+            source=source_path,
+            output=output,
+            preset=args.preset,
+            mode=args.mode,
+            difficulty=args.difficulty,
+            seed=args.seed,
+            flow_engine=args.flow_engine,
+            rhythm_engine=args.rhythm_engine,
+            modern_model=args.modern_model,
+            rhythm_threshold=args.rhythm_threshold,
+            target_density=args.target_density,
+            audio=args.audio,
+            bpm=args.bpm,
+            offset_ms=args.offset,
+            key_count=args.keys,
+            open_in_lazer=args.open_in_lazer,
+        ),
+        progress=progress,
     )
-    progress("Opening input in an isolated workspace")
-    with prepare_source(
-        source_path,
-        audio=args.audio,
-        difficulty=args.difficulty,
-        mode=args.mode,
-        bpm=args.bpm,
-        offset_ms=args.offset,
-        key_count=args.keys,
-    ) as workspace:
-        source_mode = args.mode or workspace.document.mode
-        preset = get_preset(args.preset, source_mode)
-        generated = generate_document(
-            workspace.document,
-            workspace.audio,
-            workspace.root,
-            preset,
-            config,
-            progress,
-        )
-        generated_path = workspace.root / generated_map_name(generated, preset.name)
-        generated_path.write_text(generated.text, encoding="utf-8", newline="\r\n")
-        excluded = {
-            workspace.root / "mapthis.json",
-            workspace.root / "mapthis.npz",
-            workspace.root / "rhythm_data.npz",
-        }
-        if source_path.suffix.casefold() in SUPPORTED_AUDIO:
-            excluded.add(workspace.document.path)
-        progress("Building deterministic .osz package")
-        write_osz(workspace.root, output, exclude=excluded)
-    if args.open_in_lazer:
-        progress("Opening package in osu!lazer")
-        open_in_lazer(output)
     if not args.quiet:
         print(f"Created: {output}")
     return 0
@@ -237,6 +337,147 @@ def _credits() -> int:
     return 0
 
 
+def _dataset(args: argparse.Namespace) -> int:
+    if args.dataset_command == "scan":
+        quality = QualityConfig(
+            min_objects=args.min_objects,
+            min_duration_ms=args.min_duration_ms,
+            max_duration_ms=args.max_duration_ms,
+            min_bpm=args.min_bpm,
+            max_bpm=args.max_bpm,
+            reject_converted=not args.allow_converted,
+        )
+        result = scan_dataset(
+            args.songs_root,
+            dataset_root=args.data_root,
+            quality=quality,
+        )
+        print(json.dumps(result.as_dict(), indent=2))
+        return 0
+    if args.dataset_command == "stats":
+        print(json.dumps(dataset_statistics(dataset_root=args.data_root), indent=2))
+        return 0
+    if args.dataset_command == "rate":
+        result = rate_map(args.map, args.rating, dataset_root=args.data_root)
+        print(json.dumps(result, indent=2))
+        return 0
+    if args.dataset_command == "split":
+        result = split_dataset(
+            dataset_root=args.data_root,
+            seed=args.seed,
+            train_ratio=args.train_ratio,
+            validation_ratio=args.validation_ratio,
+            test_ratio=args.test_ratio,
+            include_unrated=args.include_unrated,
+        )
+        print(json.dumps(result.as_dict(), indent=2))
+        return 0
+    if args.dataset_command == "features":
+        config = AudioFeatureConfig(
+            sample_rate=args.sample_rate,
+            hop_length=args.hop_length,
+            n_fft=args.n_fft,
+            n_mels=args.n_mels,
+            fmax=args.sample_rate / 2,
+        )
+        result = extract_dataset_features(
+            dataset_root=args.data_root,
+            config=config,
+            force=args.force,
+        )
+        print(json.dumps(result.as_dict(), indent=2))
+        return 0
+    raise OsumapperError(f"Unhandled dataset command: {args.dataset_command}")
+
+
+def _train(args: argparse.Namespace) -> int:
+    if args.train_command == "rhythm":
+        if args.epochs <= 0 or args.batch_size <= 0 or args.learning_rate <= 0:
+            raise OsumapperError("Epochs, batch size, and learning rate must be positive.")
+        if not 0 < args.threshold < 1:
+            raise OsumapperError("Prediction threshold must be between 0 and 1.")
+        context_radius = (
+            args.audio_context_radius
+            if args.audio_context_radius is not None
+            else (4 if args.architecture == "conformer-v2" else 0)
+        )
+        if context_radius < 0 or context_radius > 32:
+            raise OsumapperError("Audio context radius must be between 0 and 32.")
+        config = RhythmTrainingConfig(
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            seed=args.seed,
+            device=args.device,
+            sequence_length=args.sequence_length,
+            prediction_threshold=args.threshold,
+            architecture=args.architecture,
+            audio_context_radius=context_radius,
+        )
+        result = train_rhythm(
+            dataset_root=args.data_root,
+            output=args.output,
+            config=config,
+            resume=args.resume,
+        )
+        print(
+            json.dumps(
+                {
+                    "model": str(result.model),
+                    "best_checkpoint": str(result.best_checkpoint),
+                    "epochs_completed": result.epochs_completed,
+                    "train_windows": result.train.windows,
+                    "validation_windows": result.validation.windows,
+                },
+                indent=2,
+            )
+        )
+        return 0
+    if args.train_command == "evaluate" and args.model_kind == "rhythm":
+        report = evaluate_rhythm(
+            dataset_root=args.data_root,
+            model_root=args.model,
+            threshold=args.threshold,
+            output=args.output,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    if args.train_command == "calibrate" and args.model_kind == "rhythm":
+        report = calibrate_threshold(
+            dataset_root=args.data_root,
+            model_root=args.model,
+            output=args.output,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    if args.train_command == "review" and args.model_kind == "rhythm":
+        report = generate_review_packages(
+            dataset_root=args.data_root,
+            model_root=args.model,
+            output=args.output,
+            count=args.count,
+            seed=args.seed,
+            threshold=args.threshold,
+            open_in_lazer=args.open_in_lazer,
+        )
+        print(json.dumps(report, indent=2))
+        return 0
+    raise OsumapperError(f"Unhandled training command: {args.train_command}")
+
+
+def _analyze(args: argparse.Namespace) -> int:
+    report = analyze_map(
+        args.map,
+        model_root=args.model,
+        dataset_root=args.data_root,
+        threshold=args.threshold,
+        output=args.output,
+        timeline_format=args.format,
+    )
+    print(json.dumps(report, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -250,6 +491,12 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "credits":
             return _credits()
+        if args.command == "dataset":
+            return _dataset(args)
+        if args.command == "train":
+            return _train(args)
+        if args.command == "analyze":
+            return _analyze(args)
         if args.command == "models":
             return _models(args)
         if args.command == "stable-scan":
