@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -226,16 +227,35 @@ class BeatmapDocument:
         output = self.set_value("Metadata", "Creator", "osumapper")
         version = f"{self.version_name} - osumapper {preset} seed {seed}"
         output = output.set_value("Metadata", "Version", version)
-        return output.replace_section("HitObjects", [serialize_hit_object(obj) for obj in objects])
+        margin = 0
+        normalized = objects
+        if output.mode is GameMode.STANDARD:
+            try:
+                circle_size = float(output.value("Difficulty", "CircleSize", "4") or 4)
+            except ValueError:
+                circle_size = 4.0
+            margin = max(0, math.ceil(54.4 - 4.48 * circle_size))
+            normalized = []
+            for obj in objects:
+                updated = dict(obj)
+                if int(updated.get("type", 1)) & 8:
+                    updated["x"] = 256
+                    updated["y"] = 192
+                normalized.append(updated)
+        return output.replace_section(
+            "HitObjects",
+            [serialize_hit_object(obj, playfield_margin=margin) for obj in normalized],
+        )
 
 
 def _clamp(value: float, low: int, high: int) -> int:
     return max(low, min(high, int(round(value))))
 
 
-def serialize_hit_object(obj: dict[str, Any]) -> str:
-    x = _clamp(float(obj.get("x", 256)), 0, 512)
-    y = _clamp(float(obj.get("y", 192)), 0, 384)
+def serialize_hit_object(obj: dict[str, Any], *, playfield_margin: int = 0) -> str:
+    margin = max(0, min(192, int(playfield_margin)))
+    x = _clamp(float(obj.get("x", 256)), margin, 512 - margin)
+    y = _clamp(float(obj.get("y", 192)), margin, 384 - margin)
     timestamp = max(0, int(round(float(obj.get("time", 0)))))
     object_type = int(obj.get("type", 1))
     combo_flags = object_type & (4 | 16 | 32 | 64)
@@ -249,8 +269,8 @@ def serialize_hit_object(obj: dict[str, Any]) -> str:
         if not endpoint:
             direction = generator.get("dOut", [1.0, 0.0])
             endpoint = [x + float(direction[0]) * length, y + float(direction[1]) * length]
-        end_x = _clamp(float(endpoint[0]), 0, 512)
-        end_y = _clamp(float(endpoint[1]), 0, 384)
+        end_x = _clamp(float(endpoint[0]), margin, 512 - margin)
+        end_y = _clamp(float(endpoint[1]), margin, 384 - margin)
         return (
             f"{x},{y},{timestamp},{2 | combo_flags},{hitsounds},L|{end_x}:{end_y},1,"
             f"{length:.3f},0|0,0:0|0:0,{extended}"

@@ -88,6 +88,30 @@ class BeatmapTests(unittest.TestCase):
         self.assertEqual(circle.split(",")[3], "5")
         self.assertEqual(slider.split(",")[3], "6")
 
+    def test_standard_objects_are_clamped_inside_the_visible_playfield(self) -> None:
+        document = BeatmapDocument.read(FIXTURES / "standard.osu")
+        updated = document.with_hit_objects(
+            [
+                {"x": 0, "y": 384, "time": 500, "type": 1},
+                {
+                    "x": 600,
+                    "y": -20,
+                    "time": 1_000,
+                    "type": 2,
+                    "sliderGenerator": {"endpoint": [-50, 500], "len": 120},
+                },
+                {"x": 10, "y": 10, "time": 2_000, "type": 8},
+            ],
+            preset="test",
+            seed=2026,
+        )
+        circle, slider, spinner = updated.sections()["HitObjects"]
+
+        self.assertTrue(circle.startswith("37,347,"))
+        self.assertTrue(slider.startswith("475,37,"))
+        self.assertIn("L|37:347", slider)
+        self.assertTrue(spinner.startswith("256,192,"))
+
 
 if __name__ == "__main__":
     unittest.main()

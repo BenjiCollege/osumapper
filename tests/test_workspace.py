@@ -5,7 +5,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from osumapper.errors import PackageSafetyError
+from osumapper.errors import InputError, PackageSafetyError
 from osumapper.package import validate_osz, write_osz
 from osumapper.workspace import prepare_source, safe_extract_osz
 
@@ -45,7 +45,9 @@ class WorkspaceTests(unittest.TestCase):
             write_osz(content, first)
             write_osz(content, second)
             self.assertEqual(first.read_bytes(), second.read_bytes())
-            validate_osz(first)
+            validate_osz(first, expected_osu_count=1, expected_audio_count=1)
+            with self.assertRaises(InputError):
+                validate_osz(first, expected_osu_count=6)
 
             with prepare_source(first) as workspace:
                 self.assertEqual(workspace.document.mode, 0)

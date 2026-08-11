@@ -62,6 +62,7 @@ class GenerationOptions:
     difficulty: str | None = None
     difficulty_tier: str = "hard"
     target_stars: float = 3.35
+    full_set: bool = False
     bpm: float | None = None
     offset_ms: int | None = None
     key_count: int = 4
@@ -148,8 +149,11 @@ def build_generate_command(source: Path, output: Path, options: GenerationOption
         command.extend(("--target-density", str(options.density)))
     if options.difficulty:
         command.extend(("--difficulty", options.difficulty))
-    command.extend(("--difficulty-tier", options.difficulty_tier))
-    command.extend(("--target-stars", str(options.target_stars)))
+    if options.full_set:
+        command.append("--full-set")
+    else:
+        command.extend(("--difficulty-tier", options.difficulty_tier))
+        command.extend(("--target-stars", str(options.target_stars)))
     if options.bpm is not None:
         command.extend(("--bpm", str(options.bpm)))
     if options.offset_ms is not None:
@@ -280,6 +284,7 @@ class OsumapperStudio:
         self.difficulty_tier = tk.StringVar(value="hard")
         self.target_stars = tk.StringVar(value="3.35")
         self.difficulty_tier.trace_add("write", self._sync_target_stars)
+        self.full_set = tk.BooleanVar(value=False)
         self.bpm = tk.StringVar()
         self.offset = tk.StringVar()
         self.keys = tk.StringVar(value="4")
@@ -409,6 +414,11 @@ class OsumapperStudio:
         self._combo_row(settings, "Rhythm", self.rhythm_engine, ("legacy", "modern"))
         self._entry_row(settings, "Seed", self.seed)
         self._entry_row(settings, "Source map selector", self.difficulty)
+        ttk.Checkbutton(
+            settings,
+            text="Generate complete Easy–Expert+ set",
+            variable=self.full_set,
+        ).pack(anchor="w", pady=(4, 6))
         self._combo_row(
             settings,
             "Output difficulty",
@@ -427,6 +437,16 @@ class OsumapperStudio:
         ).pack(anchor="w", pady=(2, 7))
         self._entry_row(settings, "Modern model", self.modern_model)
         self._entry_row(settings, "Placement model", self.placement_model)
+        ttk.Label(
+            settings,
+            text=(
+                "Generated maps are local drafts. Current osu! ranking criteria do not "
+                "permit generative tooling for ranking-bound objects, timing, or hitsounds. "
+                "A criteria audit is written beside every standard .osz."
+            ),
+            style="CardText.TLabel",
+            wraplength=390,
+        ).pack(anchor="w", pady=(7, 3))
         advanced = ttk.LabelFrame(settings, text="Advanced overrides", padding=9)
         advanced.pack(fill="x", pady=(8, 10))
         self._entry_row(advanced, "Threshold", self.threshold)
@@ -511,6 +531,11 @@ class OsumapperStudio:
         ttk.Button(dataset, text="Analyze placement in a .osu map", command=self._placement).pack(
             fill="x", pady=3
         )
+        ttk.Button(
+            dataset,
+            text="Audit osu!standard ranking criteria",
+            command=self._criteria,
+        ).pack(fill="x", pady=3)
 
         ttk.Label(model, text="Model training", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
@@ -772,16 +797,23 @@ class OsumapperStudio:
             raise ValueError("Mania keys must be between 1 and 18.")
         threshold = self._optional_float(self.threshold.get(), "Threshold")
         density = self._optional_float(self.density.get(), "Density")
-        target_stars = self._optional_float(self.target_stars.get(), "Target stars")
-        if target_stars is None:
-            raise ValueError("Target stars is required for standard difficulty generation.")
-        try:
-            resolved_difficulty = resolve_standard_difficulty(
-                self.difficulty_tier.get(), target_stars
-            )
-        except InputError as exc:
-            raise ValueError(str(exc)) from exc
-        assert resolved_difficulty is not None
+        if self.full_set.get():
+            if self.rhythm_engine.get() != "modern":
+                raise ValueError("FullSet-v1 requires the modern rhythm engine.")
+            if density is not None:
+                raise ValueError("FullSet-v1 manages density per tier; clear Density.")
+            resolved_difficulty = standard_difficulty("hard"), 3.35
+        else:
+            target_stars = self._optional_float(self.target_stars.get(), "Target stars")
+            if target_stars is None:
+                raise ValueError("Target stars is required for standard difficulty generation.")
+            try:
+                resolved_difficulty = resolve_standard_difficulty(
+                    self.difficulty_tier.get(), target_stars
+                )
+            except InputError as exc:
+                raise ValueError(str(exc)) from exc
+            assert resolved_difficulty is not None
         if threshold is not None and not 0 < threshold < 1:
             raise ValueError("Threshold must be between 0 and 1.")
         if density is not None and not 0 < density <= 20:
@@ -811,6 +843,7 @@ class OsumapperStudio:
             difficulty=self.difficulty.get().strip() or None,
             difficulty_tier=resolved_difficulty[0].key,
             target_stars=resolved_difficulty[1],
+            full_set=self.full_set.get(),
             bpm=self._optional_float(self.bpm.get(), "BPM"),
             offset_ms=offset,
             key_count=keys,
@@ -838,10 +871,13 @@ class OsumapperStudio:
         reserved: set[Path] = set()
         jobs: list[tuple[str, list[str], Path]] = []
         for identifier, entry in ready:
-            base = output_root / (
-                f"{entry.source.stem}-osumapper-{options.difficulty_tier}-"
-                f"{options.target_stars:.2f}stars.osz"
-            )
+            if options.full_set:
+                base = output_root / f"{entry.source.stem}-osumapper-full-set.osz"
+            else:
+                base = output_root / (
+                    f"{entry.source.stem}-osumapper-{options.difficulty_tier}-"
+                    f"{options.target_stars:.2f}stars.osz"
+                )
             output = unique_output_path(base, reserved)
             reserved.add(output)
             entry.output = output
@@ -1026,6 +1062,23 @@ class OsumapperStudio:
             str(output),
         ]
         self._run_single(command, "Placement analysis")
+
+    def _criteria(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Choose an osu!standard beatmap",
+            filetypes=(("osu! beatmap", "*.osu"),),
+        )
+        if not selected:
+            return
+        output = Path(self.output_dir.get()) / f"{Path(selected).stem}-criteria.json"
+        command = self._base_command() + [
+            "criteria",
+            "check",
+            selected,
+            "--output",
+            str(output),
+        ]
+        self._run_single(command, "osu!standard criteria audit")
 
     def _train_placement(self) -> None:
         output = self.placement_output.get().strip()

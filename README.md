@@ -14,6 +14,16 @@ modern Python application. It accepts exported `.osz` packages, individual `.osu
 difficulties, or audio files and creates complete `.osz` packages that can be
 imported into osu!lazer.
 
+## Product goal
+
+Give osumapper one favorite song and receive one playable osu!standard `.osz`
+containing Easy, Normal, Hard, Insane, Expert, and Expert+, with the strongest
+quality emphasis on Expert and Expert+. The current **FullSet-v1** implementation
+establishes the six-map packaging and validation boundary using Conformer-v4.
+Conformer-v5 Full-Set, Placement-v2, section-aware mapping, and learned
+cross-difficulty nesting remain research milestones—not completed features. See
+[`ROADMAP.md`](ROADMAP.md) for the phased quality plan and release gates.
+
 The original 2020 implementations are preserved unchanged under [`v6.2/`](v6.2/)
 and [`v7.0/`](v7.0/). See [`legacy/README.md`](legacy/README.md) for the Git safety
 baseline and compatibility policy.
@@ -44,6 +54,8 @@ baseline and compatibility policy.
   balancing, AdamW, learning-rate reduction, and early stopping.
 - A Placement-v1 learner for flow, object types, slider lengths, and combo
   changes, plus a standalone placement/playability analyzer.
+- An osu!standard ranking-criteria audit that reports objective rules,
+  measurable guidelines, and mandatory manual checks without claiming rankability.
 - Representative fixtures, golden-output tests, safe-archive tests, and
   cross-ruleset smoke coverage.
 
@@ -123,6 +135,24 @@ created only when its real star value is inside the selected band and within
 and asks for a density adjustment or more V4 training data. This prevents a
 filename from claiming a difficulty the map did not actually achieve.
 
+## Generate a complete six-difficulty set
+
+FullSet-v1 analyzes/caches the source audio in one isolated workspace, runs the
+star-conditioned V4 model for all six fixed targets, and writes exactly six `.osu`
+files with one shared audio file. Each tier receives up to four bounded density
+correction attempts. Export is refused unless every difficulty is inside its band
+and within 0.25★ of target, mean star error is below 0.15★, timing sections are
+identical, and deterministic gameplay-safety checks pass.
+
+```powershell
+uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --flow-engine deterministic --full-set --output output/song-full-set.osz --open
+```
+
+The command writes `song-full-set.full-set.json` plus one
+`song-full-set.<tier>.criteria.json` report per difficulty. FullSet-v1 runs V4
+independently for each tier; learned event nesting and one-pass shared inference
+require Conformer-v5. The output is a local draft and is not eligible for ranking.
+
 ## Command examples
 
 Generate from an exported osu!lazer package:
@@ -195,6 +225,11 @@ model, validation-calibrated threshold override, density, difficulty, BPM,
 offset, and mania keys. **Import each completed package into osu!lazer** opens
 every successful `.osz` as it finishes.
 
+Enable **Generate complete Easy–Expert+ set** to create one validated six-map
+package for every queued song. Full-set mode manages tier density and star targets
+itself, so the individual Density, Output difficulty, and Target stars values are
+not passed to generation.
+
 The **Training lab** tab provides safe `.osz` ingestion, explicit GOOD-map
 curation, scan/statistics/split/feature/window controls, Conformer-v3 and
 Placement-v1 GPU training, calibration, held-out evaluation, review packages,
@@ -231,6 +266,7 @@ The most useful `generate` options are:
 | `--difficulty TEXT` | Select a difficulty from a multi-map `.osz`. |
 | `--difficulty-tier NAME` | Select `easy`, `normal`, `hard`, `insane`, `expert`, or `expert-plus` for V4 output. |
 | `--target-stars NUMBER` | Fix the requested no-mod standard star target inside the selected tier. |
+| `--full-set` | Generate all six fixed standard tiers in one validated `.osz`. |
 | `--seed INTEGER` | Set the deterministic seed; the default is `2026`. |
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
 | `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |
@@ -260,9 +296,36 @@ Run `uv run osumapper generate --help` for the authoritative command reference.
 5. Open the generated difficulty in the editor and review timing, object placement,
    hitsounds, metadata, and playability before publishing.
 
-Generated maps are starting points for human review. Automatic generation does not
-guarantee ranking quality, accessibility, or compliance with current osu! ranking
-criteria.
+Generated maps are starting points for private/local review. The current general
+osu! ranking criteria require ranking-bound hit objects, hitsounds, and timing to
+be created exclusively through direct human input, so an osumapper-generated map
+is **not eligible for the ranking process**. Do not submit generated output as a
+rankable beatmap. See the official [general ranking criteria](https://osu.ppy.sh/wiki/en/Ranking_criteria)
+and [osu!standard criteria](https://osu.ppy.sh/wiki/en/Ranking_criteria/osu%21).
+
+## Ranking-criteria audit
+
+Every generated osu!standard package now receives a sibling report: generating
+`song.osz` also writes `song.criteria.json`. The report checks the deterministic subset of the
+criteria, including object timing gaps, duplicate timestamps, common beat-snap
+errors, partially off-screen geometry, timing-point collisions, kiai on the first
+uninherited point, minimum drain time, audio extension, preview point, background,
+combo-colour count, difficulty-setting guidelines, and difficulty-specific spinner
+and overlap limits.
+
+Audit an existing standard difficulty directly:
+
+```powershell
+uv run osumapper criteria check "C:\Maps\review\difficulty.osu" --output "output\difficulty-criteria.json"
+```
+
+Add `--strict` for CI or scripting that should return a non-zero exit status when
+objective structural errors are found. A clean automated result is not a
+rankability certificate. Musical timing, permissions, authorship, hitsound
+audibility, visual safety/readability, slider clarity, full-mapset spread, and
+playability still require human review and tools such as Mapset Verifier. The
+implemented policy snapshot is dated 2026-08-11; always consult the current wiki
+before relying on it.
 
 ## Optional osu!stable adapter
 
@@ -784,19 +847,13 @@ measure obvious flow/playability problems; they are not proof of map quality.
 
 ### Recommended research order
 
-For meaningful quality gains, curate and rate maps before scaling model size.
-Train rated-only Conformer-v3 on seed 2026, calibrate on validation songs, and
-compare the same test metrics and review-song rubric against the completed
-Conformer-v2 baseline. Review timing, rhythm choice, density, pattern
-readability, spacing, and playability separately; one aggregate score can hide
-regressions.
-
-Conformer-v3 now implements difficulty-conditioned thresholds, per-song
-weighting, cached shards, and the controlled Placement-v1 boundary. The next
-research step is an ablation on an optional frozen MERT front end; it is not
-enabled by default because it adds preprocessing time, storage, licensing, and
-distribution considerations. Establish the rated v3 and Placement-v1 scores
-first so MERT has a fair baseline to beat.
+Preserve and evaluate the completed V4 benchmark first. Curate GOOD-only maps,
+then train Conformer-v5 Full-Set with a shared encoder, six tier heads, Expert and
+Expert+ capacity/weighting, auxiliary musical targets, hard negatives, and
+per-tier calibration. Placement-v2 follows after rhythm wins on the frozen split.
+Optional frozen MERT features are an ablation only after those controlled
+baselines are stable. The complete sequence and acceptance targets are maintained
+in [`ROADMAP.md`](ROADMAP.md).
 
 Inspect one human map against the model and export a timestamp-by-timestamp JSON
 and CSV timeline:

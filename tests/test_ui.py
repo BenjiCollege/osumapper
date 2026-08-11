@@ -67,6 +67,23 @@ class UiHelperTests(unittest.TestCase):
             self.assertIn("--open", command)
             self.assertEqual(command[command.index("--keys") + 1], "7")
 
+    def test_full_set_command_uses_one_flag_instead_of_individual_target(self) -> None:
+        command = build_generate_command(
+            Path("song.mp3"),
+            Path("song-full-set.osz"),
+            GenerationOptions(
+                mode="standard",
+                rhythm_engine="modern",
+                modern_model=Path("model"),
+                full_set=True,
+            ),
+        )
+
+        self.assertIn("--full-set", command)
+        self.assertNotIn("--difficulty-tier", command)
+        self.assertNotIn("--target-stars", command)
+        self.assertNotIn("--target-density", command)
+
 
 if __name__ == "__main__":
     unittest.main()

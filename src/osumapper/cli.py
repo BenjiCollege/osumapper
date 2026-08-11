@@ -15,6 +15,7 @@ from osumapper import (
     __version__,
 )
 from osumapper.config import GameMode
+from osumapper.criteria import audit_standard_criteria
 from osumapper.difficulty import (
     LEGACY_DIFFICULTY_FEATURES,
     STANDARD_DIFFICULTY_KEYS,
@@ -126,6 +127,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         help="target no-mod star rating inside the selected standard tier",
     )
+    generate.add_argument(
+        "--full-set",
+        action="store_true",
+        help="generate Easy through Expert+ as one six-difficulty osu!standard package",
+    )
     generate.add_argument("--bpm", type=float, help="tempo for audio-only input")
     generate.add_argument("--offset", type=int, help="timing offset in milliseconds")
     generate.add_argument(
@@ -138,6 +144,19 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("presets", help="list generation presets")
     subparsers.add_parser("ui", help="open the local drag-and-drop interface")
     subparsers.add_parser("credits", help="show original-project attribution")
+
+    criteria = subparsers.add_parser(
+        "criteria", help="audit the machine-verifiable subset of osu! ranking criteria"
+    )
+    criteria_sub = criteria.add_subparsers(dest="criteria_command", required=True)
+    criteria_check = criteria_sub.add_parser("check", help="audit one osu!standard .osu difficulty")
+    criteria_check.add_argument("map", type=Path)
+    criteria_check.add_argument("--output", type=Path, help="optional JSON report path")
+    criteria_check.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit with code 2 when objective errors are found",
+    )
 
     dataset = subparsers.add_parser("dataset", help="build and manage local training data")
     dataset_sub = dataset.add_subparsers(dest="dataset_command", required=True)
@@ -385,6 +404,7 @@ def _generate(args: argparse.Namespace) -> int:
             target_density=args.target_density,
             difficulty_tier=args.difficulty_tier,
             target_stars=args.target_stars,
+            full_set=args.full_set,
             audio=args.audio,
             bpm=args.bpm,
             offset_ms=args.offset,
@@ -467,6 +487,15 @@ def _credits() -> int:
     print(f"2026 modernization: {__maintainer__} and contributors")
     print("This package is a maintained derivative of the original project.")
     return 0
+
+
+def _criteria(args: argparse.Namespace) -> int:
+    if args.criteria_command != "check":
+        raise OsumapperError(f"Unhandled criteria command: {args.criteria_command}")
+    report = audit_standard_criteria(args.map, output=args.output)
+    print(json.dumps(report, indent=2))
+    structural_errors = int(report["summary"]["structural_error_occurrences"])
+    return 2 if args.strict and structural_errors else 0
 
 
 def _dataset(args: argparse.Namespace) -> int:
@@ -721,6 +750,8 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.command == "credits":
             return _credits()
+        if args.command == "criteria":
+            return _criteria(args)
         if args.command == "dataset":
             return _dataset(args)
         if args.command == "train":

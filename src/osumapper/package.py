@@ -10,6 +10,7 @@ from osumapper.beatmap import BeatmapDocument
 from osumapper.errors import InputError
 
 _INVALID_FILENAME = '<>:"/\\|?*'
+_AUDIO_EXTENSIONS = {".mp3", ".ogg", ".wav", ".flac", ".m4a", ".aac", ".opus"}
 
 
 def safe_filename(value: str, suffix: str) -> str:
@@ -21,11 +22,17 @@ def safe_filename(value: str, suffix: str) -> str:
     return f"{cleaned or 'osumapper-generated'}{suffix}"
 
 
-def generated_map_name(document: BeatmapDocument, preset: str) -> str:
+def generated_map_name(
+    document: BeatmapDocument,
+    preset: str,
+    *,
+    difficulty_label: str | None = None,
+) -> str:
     metadata = document.values("Metadata")
     artist = metadata.get("ArtistUnicode") or metadata.get("Artist") or "Unknown Artist"
     title = metadata.get("TitleUnicode") or metadata.get("Title") or "Untitled"
-    return safe_filename(f"{artist} - {title} (osumapper) [{preset}]", ".osu")
+    label = difficulty_label or preset
+    return safe_filename(f"{artist} - {title} (osumapper) [{label}]", ".osu")
 
 
 def _archive_paths(root: Path, excluded: set[Path]) -> list[Path]:
@@ -70,12 +77,31 @@ def write_osz(root: Path, output: Path, *, exclude: set[Path] | None = None) -> 
     return output
 
 
-def validate_osz(path: Path) -> None:
+def validate_osz(
+    path: Path,
+    *,
+    expected_osu_count: int | None = None,
+    expected_audio_count: int | None = None,
+) -> None:
     try:
         with zipfile.ZipFile(path) as archive:
             names = archive.namelist()
-            if not any(name.casefold().endswith(".osu") for name in names):
+            osu_names = [name for name in names if name.casefold().endswith(".osu")]
+            if not osu_names:
                 raise InputError(f"Generated package has no .osu difficulty: {path}")
+            if expected_osu_count is not None and len(osu_names) != expected_osu_count:
+                raise InputError(
+                    f"Generated package contains {len(osu_names)} .osu difficulties; "
+                    f"expected {expected_osu_count}: {path}"
+                )
+            audio_names = [
+                name for name in names if Path(name).suffix.casefold() in _AUDIO_EXTENSIONS
+            ]
+            if expected_audio_count is not None and len(audio_names) != expected_audio_count:
+                raise InputError(
+                    f"Generated package contains {len(audio_names)} audio files; "
+                    f"expected {expected_audio_count}: {path}"
+                )
             bad = archive.testzip()
             if bad:
                 raise InputError(f"Generated package contains a corrupt entry: {bad}")

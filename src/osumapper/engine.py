@@ -266,7 +266,7 @@ def _place_standard_objects(
                     else timestamps[index] + 1000
                 )
                 objects[index]["spinnerEndTime"] = max(
-                    int(timestamps[index]) + 1, int(next_time) - 1
+                    int(timestamps[index]) + 1, int(next_time) - 20
                 )
         return objects
 
@@ -402,16 +402,18 @@ def generate_document(
     if requested_difficulty is not None:
         profile, target_stars = requested_difficulty
         actual_stars = calculate_standard_stars(generated)
-        if (
+        target_missed = (
             not profile.contains(actual_stars)
             or abs(actual_stars - target_stars) > STAR_TARGET_TOLERANCE
-        ):
+        )
+        if target_missed and config.enforce_star_target:
             raise GenerationError(
                 f"Generated {actual_stars:.2f}★ for a requested {target_stars:.2f}★ "
                 f"{profile.label} target ({profile.range_label}, allowed target error "
                 f"±{STAR_TARGET_TOLERANCE:.2f}★). "
                 "Adjust --target-density or retrain Conformer-v4 with more maps in this band."
             )
-        progress(f"Verified {profile.label}: {actual_stars:.2f}★ for requested {target_stars:.2f}★")
+        status = "Measured" if target_missed else "Verified"
+        progress(f"{status} {profile.label}: {actual_stars:.2f}★ for requested {target_stars:.2f}★")
         generated = label_standard_difficulty(generated, profile, actual_stars)
     return generated
