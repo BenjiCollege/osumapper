@@ -230,6 +230,21 @@ class BeatmapDocument:
         margin = 0
         normalized = objects
         if output.mode is GameMode.STANDARD:
+            combo_colours = [
+                line
+                for line in output.sections().get("Colours", [])
+                if line.strip().casefold().startswith("combo") and ":" in line
+            ]
+            if len(combo_colours) < 2:
+                output = output.replace_section(
+                    "Colours",
+                    [
+                        "Combo1 : 91,140,255",
+                        "Combo2 : 66,200,154",
+                        "Combo3 : 255,107,122",
+                        "Combo4 : 238,242,255",
+                    ],
+                )
             try:
                 circle_size = float(output.value("Difficulty", "CircleSize", "4") or 4)
             except ValueError:

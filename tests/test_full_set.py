@@ -7,10 +7,22 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
+import numpy as np
+
 from osumapper.config import GameMode
-from osumapper.difficulty import STANDARD_DIFFICULTIES, apply_standard_difficulty
+from osumapper.difficulty import (
+    STANDARD_DIFFICULTIES,
+    apply_standard_difficulty,
+    standard_difficulty,
+)
+from osumapper.engine import _deterministic_flow
 from osumapper.errors import InputError
-from osumapper.pipeline import GenerationRequest, _next_density, generate_package
+from osumapper.pipeline import (
+    GenerationRequest,
+    _next_density,
+    _next_full_set_controls,
+    generate_package,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -21,6 +33,36 @@ class FullSetTests(unittest.TestCase):
         self.assertLess(_next_density(2.0, 3.0, 5.0), 2.0)
         self.assertLessEqual(_next_density(19.9, 20.0, 0.1), 20.0)
         self.assertGreaterEqual(_next_density(0.1, 0.1, 20.0), 0.1)
+
+    def test_expert_retry_increases_spacing_instead_of_only_adding_objects(self) -> None:
+        profile = standard_difficulty("expert-plus")
+        density, flow_scale = _next_full_set_controls(profile, 3.5, 1.0, 5.83)
+
+        self.assertGreater(density, 3.5)
+        self.assertLess(density, 3.85)
+        self.assertGreater(flow_scale, 1.2)
+
+    def test_deterministic_flow_scale_increases_mean_jump_distance(self) -> None:
+        count = 24
+        zeros = np.zeros(count, dtype=int)
+        converted = (
+            np.ones(count, dtype=int),
+            np.zeros((count, 5), dtype=float),
+            np.arange(count),
+            np.arange(count) * 100,
+            zeros.copy(),
+            zeros.copy(),
+            zeros.copy(),
+            np.full(count, 140.0),
+            zeros.copy(),
+            1.0,
+        )
+        base, _data = _deterministic_flow(converted, 2026, 1.0)
+        wider, _data = _deterministic_flow(converted, 2026, 1.25)
+        base_mean = float(np.linalg.norm(np.diff(base[:, :2], axis=0), axis=1).mean())
+        wider_mean = float(np.linalg.norm(np.diff(wider[:, :2], axis=0), axis=1).mean())
+
+        self.assertGreater(wider_mean, base_mean * 1.1)
 
     def test_full_set_rejects_incompatible_controls_before_opening_source(self) -> None:
         with tempfile.TemporaryDirectory() as name:

@@ -27,9 +27,12 @@ do not permit generative tooling for ranking-bound objects, timing, or hitsounds
 - One `--full-set` CLI and Studio workflow.
 - One isolated workspace and cached audio features for all six generations.
 - Fixed targets: 1.50★, 2.35★, 3.35★, 4.65★, 5.90★, and 7.00★.
-- Bounded density correction with strict per-map and set-level star gates.
+- Bounded density correction plus separate Expert/Expert+ spatial-strain
+  correction, with strict per-map and set-level star gates.
 - Safe playfield geometry, shared timing verification, exact archive counts, and
   deterministic packaging.
+- Preservation of referenced background, video, and storyboard assets for
+  explicit-map input, deterministic preview fallback, and usable combo colours.
 - Per-tier criteria reports plus a set-level machine-readable quality report.
 
 FullSet-v1 deliberately uses independent V4 passes. It provides the product and

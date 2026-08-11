@@ -50,6 +50,24 @@ def _require_audio_stack() -> tuple[Any, Any]:
     return np, librosa
 
 
+def ensure_preview_time(document: BeatmapDocument, _audio: Path) -> BeatmapDocument:
+    try:
+        current = int(document.value("General", "PreviewTime", "-1") or -1)
+    except ValueError:
+        current = -1
+    if current >= 0:
+        return document
+    timestamps: list[int] = []
+    for line in document.sections().get("HitObjects", []):
+        fields = line.split(",")
+        if len(fields) < 3:
+            continue
+        with contextlib.suppress(ValueError):
+            timestamps.append(max(0, int(round(float(fields[2])))))
+    preview_ms = int(max(timestamps, default=0) * 0.4)
+    return document.set_value("General", "PreviewTime", str(preview_ms))
+
+
 def _audio_features(timestamps: Any, audio: Path, *, fft_size: int = 128) -> Any:
     np, librosa = _require_audio_stack()
     signal, sample_rate = librosa.load(audio, sr=None, mono=True)
@@ -159,7 +177,9 @@ def _load_model(path: Path) -> Any:
         ) from exc
 
 
-def _deterministic_flow(converted: tuple[Any, ...], seed: int) -> tuple[Any, tuple[Any, ...]]:
+def _deterministic_flow(
+    converted: tuple[Any, ...], seed: int, flow_scale: float = 1.0
+) -> tuple[Any, tuple[Any, ...]]:
     np, _ = _require_audio_stack()
     (
         objs,
@@ -178,8 +198,9 @@ def _deterministic_flow(converted: tuple[Any, ...], seed: int) -> tuple[Any, tup
     golden = math.pi * (3 - math.sqrt(5))
     angles = phase + np.arange(count) * golden
     radii = 118 + 42 * np.sin(np.arange(count) * 0.61 + phase)
-    x = np.clip(256 + radii * np.cos(angles), 32, 480)
-    y = np.clip(192 + radii * 0.72 * np.sin(angles), 28, 356)
+    scale = max(0.5, min(2.0, float(flow_scale)))
+    x = np.clip(256 + radii * scale * np.cos(angles), 32, 480)
+    y = np.clip(192 + radii * scale * 0.72 * np.sin(angles), 28, 356)
     maps = np.zeros((count, 6), dtype=float)
     for index in range(count):
         next_index = min(index + 1, count - 1)
@@ -240,8 +261,8 @@ def _place_standard_objects(
                     raise GenerationError(f"Legacy GAN flow failed: {exc}") from exc
                 progress(f"Legacy GAN unavailable; using deterministic flow ({exc})")
         if flow_result is None:
-            progress("Generating deterministic flow")
-            flow_result = _deterministic_flow(converted, config.seed)
+            progress(f"Generating deterministic flow at {config.flow_scale:.3f}× spacing")
+            flow_result = _deterministic_flow(converted, config.seed, config.flow_scale)
         osu_array, data = flow_result
 
         modding = importlib.import_module("act_modding")
@@ -341,6 +362,7 @@ def generate_document(
     progress: Progress = print,
 ) -> BeatmapDocument:
     configure_determinism(config.seed)
+    document = ensure_preview_time(document, audio)
     requested_difficulty = resolve_standard_difficulty(config.difficulty_tier, config.target_stars)
     if requested_difficulty is not None:
         profile, _target_stars = requested_difficulty

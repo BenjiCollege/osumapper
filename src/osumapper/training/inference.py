@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,11 @@ from osumapper.training.storage import read_json
 from osumapper.training.trainer import default_model_root
 
 Progress = Callable[[str], None]
+
+
+@lru_cache(maxsize=2)
+def _cached_inference_model(path: str) -> Any:
+    return load_rhythm_model(Path(path), compile_model=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,7 +210,7 @@ def predict_modern_rhythm(
         labels=np.zeros((len(grid.candidates), 1), dtype=np.float32),
     )
     progress(f"Running modern rhythm model across {len(grid.candidates)} grid positions")
-    model = load_rhythm_model(model_path, compile_model=False)
+    model = _cached_inference_model(str(model_path))
     probabilities = window_probabilities(model, prepared, grid_config.sequence_length)
     candidate_times = np.asarray(
         [candidate.timestamp_ms for candidate in grid.candidates], dtype=np.float64

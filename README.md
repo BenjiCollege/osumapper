@@ -139,10 +139,13 @@ filename from claiming a difficulty the map did not actually achieve.
 
 FullSet-v1 analyzes/caches the source audio in one isolated workspace, runs the
 star-conditioned V4 model for all six fixed targets, and writes exactly six `.osu`
-files with one shared audio file. Each tier receives up to four bounded density
-correction attempts. Export is refused unless every difficulty is inside its band
-and within 0.25★ of target, mean star error is below 0.15★, timing sections are
-identical, and deterministic gameplay-safety checks pass.
+files with one shared audio file. Each tier receives up to four bounded correction
+attempts; Expert and Expert+ adjust spatial strain separately from density so a
+harder map is not produced only by flooding it with objects. Referenced background,
+video, and storyboard assets are preserved for explicit `.osu` input. Export is
+refused unless every difficulty is inside its band and within 0.25★ of target,
+mean star error is below 0.15★, timing sections are identical, and deterministic
+gameplay-safety checks pass.
 
 ```powershell
 uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --flow-engine deterministic --full-set --output output/song-full-set.osz --open

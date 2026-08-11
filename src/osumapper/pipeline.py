@@ -15,7 +15,7 @@ from osumapper.difficulty import (
     calculate_standard_stars,
     resolve_standard_difficulty,
 )
-from osumapper.engine import generate_document
+from osumapper.engine import ensure_preview_time, generate_document
 from osumapper.errors import GenerationError, InputError
 from osumapper.lazer import open_in_lazer
 from osumapper.package import generated_map_name, validate_osz, write_osz
@@ -67,6 +67,7 @@ class FullSetDifficultyResult:
     document: BeatmapDocument
     actual_stars: float
     density: float
+    flow_scale: float
     attempts: int
 
 
@@ -102,6 +103,20 @@ def _next_density(current: float, target_stars: float, actual_stars: float) -> f
     return candidate
 
 
+def _next_full_set_controls(
+    profile: StandardDifficulty,
+    density: float,
+    flow_scale: float,
+    actual_stars: float,
+) -> tuple[float, float]:
+    if profile.key not in {"expert", "expert-plus"}:
+        return _next_density(density, profile.default_stars, actual_stars), flow_scale
+    ratio = profile.default_stars / max(0.1, actual_stars)
+    next_density = density * max(0.9, min(1.1, ratio**0.25))
+    next_flow = flow_scale * max(0.75, min(1.35, ratio**1.2))
+    return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
+
+
 def _generate_full_set_difficulty(
     document: BeatmapDocument,
     audio: Path,
@@ -112,11 +127,13 @@ def _generate_full_set_difficulty(
     progress: Progress,
 ) -> FullSetDifficultyResult:
     density = profile.target_density
-    best: tuple[BeatmapDocument, float, float, int] | None = None
+    flow_scale = 1.0
+    best: tuple[BeatmapDocument, float, float, float, int] | None = None
     for attempt in range(1, FULL_SET_MAX_ATTEMPTS + 1):
         progress(
             f"Generating {profile.label} {profile.default_stars:.2f}★ "
-            f"(attempt {attempt}/{FULL_SET_MAX_ATTEMPTS}, density {density:.3f})"
+            f"(attempt {attempt}/{FULL_SET_MAX_ATTEMPTS}, density {density:.3f}, "
+            f"spacing {flow_scale:.3f}×)"
         )
         config = replace(
             base_config,
@@ -125,6 +142,7 @@ def _generate_full_set_difficulty(
             target_stars=profile.default_stars,
             target_density=density,
             enforce_star_target=False,
+            flow_scale=flow_scale,
         )
         generated = generate_document(
             document,
@@ -137,22 +155,29 @@ def _generate_full_set_difficulty(
         actual_stars = calculate_standard_stars(generated)
         error = abs(actual_stars - profile.default_stars)
         if best is None or error < abs(best[1] - profile.default_stars):
-            best = (generated, actual_stars, density, attempt)
+            best = (generated, actual_stars, density, flow_scale, attempt)
         if profile.contains(actual_stars) and error <= STAR_TARGET_TOLERANCE:
             return FullSetDifficultyResult(
                 profile=profile,
                 document=generated,
                 actual_stars=actual_stars,
                 density=density,
+                flow_scale=flow_scale,
                 attempts=attempt,
             )
-        density = _next_density(density, profile.default_stars, actual_stars)
+        density, flow_scale = _next_full_set_controls(
+            profile,
+            density,
+            flow_scale,
+            actual_stars,
+        )
     assert best is not None
-    _document, actual_stars, used_density, attempts = best
+    _document, actual_stars, used_density, used_flow_scale, attempts = best
     raise GenerationError(
         f"FullSet-v1 could not reach {profile.label} {profile.default_stars:.2f}★ "
         f"within ±{STAR_TARGET_TOLERANCE:.2f}★ after {attempts} attempts. "
-        f"Best result was {actual_stars:.2f}★ at density {used_density:.3f}. "
+        f"Best result was {actual_stars:.2f}★ at density {used_density:.3f} and "
+        f"spacing {used_flow_scale:.3f}×. "
         "Preserving the package boundary rather than exporting an inaccurate tier."
     )
 
@@ -235,6 +260,7 @@ def _write_full_set_reports(
                 "actual_stars": result.actual_stars,
                 "star_error": abs(result.actual_stars - result.profile.default_stars),
                 "density": result.density,
+                "flow_scale": result.flow_scale,
                 "attempts": result.attempts,
                 "criteria_summary": reports[result.profile.key]["summary"],
                 "map_name": generated_map_name(
@@ -316,6 +342,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         offset_ms=request.offset_ms,
         key_count=request.key_count,
     ) as workspace:
+        workspace.document = ensure_preview_time(workspace.document, workspace.audio)
         if (requested_difficulty is not None or request.full_set) and (
             workspace.document.mode is not GameMode.STANDARD
         ):

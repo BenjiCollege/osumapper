@@ -26,12 +26,26 @@ class WorkspaceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             beatmap = root / "standard.osu"
-            beatmap.write_bytes((FIXTURES / "standard.osu").read_bytes())
+            text = (
+                (FIXTURES / "standard.osu")
+                .read_text(encoding="utf-8")
+                .replace(
+                    "[Events]\n",
+                    '[Events]\n0,0,"background.jpg"\n1,0,"video.mp4"\n',
+                )
+            )
+            beatmap.write_text(text, encoding="utf-8")
             (root / "audio.wav").write_bytes(b"RIFF-fixture")
+            (root / "background.jpg").write_bytes(b"image")
+            (root / "video.mp4").write_bytes(b"video")
+            (root / "storyboard.osb").write_text("[Events]\n", encoding="utf-8")
             with prepare_source(beatmap) as workspace:
                 self.assertNotEqual(workspace.root, root)
                 self.assertTrue(workspace.document.path.is_file())
                 self.assertTrue(workspace.audio.is_file())
+                self.assertTrue((workspace.root / "background.jpg").is_file())
+                self.assertTrue((workspace.root / "video.mp4").is_file())
+                self.assertTrue((workspace.root / "storyboard.osb").is_file())
 
     def test_osz_output_is_deterministic(self) -> None:
         with tempfile.TemporaryDirectory() as name:

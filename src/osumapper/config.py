@@ -52,6 +52,7 @@ class GenerationConfig:
     difficulty_tier: str | None = None
     target_stars: float | None = None
     enforce_star_target: bool = True
+    flow_scale: float = 1.0
 
 
 def configure_determinism(seed: int) -> None:

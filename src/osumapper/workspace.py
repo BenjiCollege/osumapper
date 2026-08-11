@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import shutil
 import stat
 import tempfile
@@ -15,6 +16,28 @@ from osumapper.timing import create_timed_beatmap, estimate_timing
 MAX_ARCHIVE_FILES = 20_000
 MAX_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 SUPPORTED_AUDIO = {".mp3", ".ogg", ".wav", ".flac", ".m4a", ".aac", ".opus"}
+_QUOTED_ASSET = re.compile(r'"(?P<name>[^"\r\n]+)"')
+
+
+def _copy_explicit_map_assets(source: Path, root: Path, document: BeatmapDocument) -> None:
+    names = {
+        match.group("name")
+        for line in document.sections().get("Events", [])
+        for match in _QUOTED_ASSET.finditer(line)
+    }
+    names.update(
+        path.name
+        for path in source.parent.iterdir()
+        if path.is_file() and path.suffix.casefold() == ".osb"
+    )
+    for name in sorted(names, key=str.casefold):
+        relative = _safe_relative_path(name.replace("\\", "/"))
+        source_asset = source.parent / relative
+        if not source_asset.is_file():
+            continue
+        target = root / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source_asset, target)
 
 
 def _safe_relative_path(name: str) -> Path:
@@ -116,6 +139,7 @@ def prepare_source(
             target = root / source.name
             shutil.copy2(source, target)
             document = BeatmapDocument.read(target)
+            _copy_explicit_map_assets(source, root, document)
         elif source.suffix.casefold() in SUPPORTED_AUDIO:
             selected_mode = mode or GameMode.STANDARD
             target_audio = root / source.name

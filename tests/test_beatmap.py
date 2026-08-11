@@ -111,6 +111,12 @@ class BeatmapTests(unittest.TestCase):
         self.assertTrue(slider.startswith("475,37,"))
         self.assertIn("L|37:347", slider)
         self.assertTrue(spinner.startswith("256,192,"))
+        combo_colours = [
+            line
+            for line in updated.sections()["Colours"]
+            if line.strip().casefold().startswith("combo")
+        ]
+        self.assertGreaterEqual(len(combo_colours), 2)
 
 
 if __name__ == "__main__":
