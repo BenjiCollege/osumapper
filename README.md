@@ -141,10 +141,13 @@ filename from claiming a difficulty the map did not actually achieve.
 FullSet-v1 analyzes/caches the source audio in one isolated workspace, runs the
 star-conditioned V4 model for all six fixed targets, and writes exactly six `.osu`
 files with one shared audio file. Precision calibration uses up to 16 bounded
-attempts per tier by default. Its coarse phase adjusts density and spacing; after
-the measured result enters the valid target region, it locks V4's selected rhythm
-timestamps and fine-tunes only PatternPlanner spacing. Repeated fine passes reuse
-the cached rhythm prediction. Referenced background, video, and
+attempts per tier by default. Its coarse phase adjusts density, detects when the
+model's selected rhythm has saturated, and then adapts the tier probability
+threshold when density alone cannot add or remove objects. After the measured result
+enters the valid target region, it locks the selected rhythm timestamps and
+fine-tunes only PatternPlanner spacing. Every decision, object count, and threshold
+is recorded in the full-set quality report. Repeated fine passes reuse the cached
+rhythm prediction. Referenced background, video, and
 storyboard assets are preserved for explicit `.osu` input; audio-only input receives
 a neutral packaged background. Export is refused unless every difficulty is inside
 its band and within the requested star precision, timing sections are identical,

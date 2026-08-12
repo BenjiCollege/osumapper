@@ -22,7 +22,9 @@ from osumapper.pipeline import (
     GenerationRequest,
     _next_density,
     _next_full_set_controls,
+    _next_plateau_threshold,
     _next_precision_flow,
+    _rhythm_selection_plateaued,
     generate_package,
 )
 
@@ -61,6 +63,41 @@ class FullSetTests(unittest.TestCase):
         flow = _next_precision_flow(history, density=1.2, target_stars=3.35)
 
         self.assertAlmostEqual(flow, 1.0, places=6)
+
+    def test_density_plateau_switches_to_spacing_after_three_stable_maps(self) -> None:
+        history = [
+            CalibrationAttempt(1, "coarse-density", 2.2, 1.0, 3.56, 1.09, 288),
+            CalibrationAttempt(2, "coarse-density", 2.9, 1.0, 3.56, 1.09, 289),
+            CalibrationAttempt(3, "coarse-density", 3.8, 1.0, 3.56, 1.09, 289),
+        ]
+
+        self.assertTrue(_rhythm_selection_plateaued(history))
+        self.assertFalse(_rhythm_selection_plateaued(history[:2]))
+
+    def test_density_plateau_does_not_trigger_while_object_count_is_growing(self) -> None:
+        history = [
+            CalibrationAttempt(1, "coarse-density", 1.0, 1.0, 2.5, 2.1, 100),
+            CalibrationAttempt(2, "coarse-density", 1.5, 1.0, 3.0, 1.6, 145),
+            CalibrationAttempt(3, "coarse-density", 2.0, 1.0, 3.5, 1.1, 190),
+        ]
+
+        self.assertFalse(_rhythm_selection_plateaued(history))
+
+    def test_plateau_threshold_adds_candidates_when_stars_are_too_low(self) -> None:
+        self.assertLess(_next_plateau_threshold(0.84, 4.65, 3.56), 0.84)
+
+    def test_plateau_threshold_removes_candidates_when_stars_are_too_high(self) -> None:
+        self.assertGreater(_next_plateau_threshold(0.84, 4.65, 6.0), 0.84)
+
+    def test_precision_flow_ignores_nonmonotonic_spacing_measurements(self) -> None:
+        history = [
+            CalibrationAttempt(1, "fine-spacing", 3.7, 1.9, 4.21, 0.44),
+            CalibrationAttempt(2, "fine-spacing", 3.7, 2.0, 4.18, 0.47),
+        ]
+
+        flow = _next_precision_flow(history, density=3.7, target_stars=4.65)
+
+        self.assertEqual(flow, 2.0)
 
     def test_deterministic_flow_scale_increases_mean_jump_distance(self) -> None:
         count = 24

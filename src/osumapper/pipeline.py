@@ -73,6 +73,8 @@ class CalibrationAttempt:
     flow_scale: float
     actual_stars: float
     star_error: float
+    object_count: int | None = None
+    rhythm_threshold: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,7 +171,9 @@ def _next_precision_flow(
         first, second = sorted(same_rhythm, key=lambda item: item.attempt)[-2:]
         star_delta = second.actual_stars - first.actual_stars
         flow_delta = second.flow_scale - first.flow_scale
-        if abs(star_delta) >= 1e-4 and abs(flow_delta) >= 1e-5:
+        # Playfield clamping can make wider spacing slightly easier. Do not
+        # extrapolate from a slope that points opposite the expected direction.
+        if star_delta * flow_delta > 0 and abs(star_delta) >= 1e-4:
             candidate = second.flow_scale + (
                 (target_stars - second.actual_stars) * flow_delta / star_delta
             )
@@ -192,6 +196,72 @@ def _next_precision_flow(
     return candidate
 
 
+def _rhythm_selection_plateaued(history: list[CalibrationAttempt]) -> bool:
+    """Detect when density changes no longer change the selected rhythm.
+
+    A calibrated model may reach its available high-confidence candidates well
+    before the requested star rating. Continuing to multiply density then repeats
+    effectively identical maps. Three stable measurements are enough to hand the
+    remaining correction to spatial strain.
+    """
+
+    if len(history) < 3:
+        return False
+    recent = history[-3:]
+    counts = [item.object_count for item in recent]
+    if any(count is None for count in counts):
+        return False
+    numeric_counts = [int(count) for count in counts if count is not None]
+    thresholds = [item.rhythm_threshold for item in recent]
+    count_tolerance = max(2, round(sum(numeric_counts) / len(numeric_counts) * 0.01))
+    return (
+        all(item.phase.startswith("coarse-") for item in recent)
+        and max(item.flow_scale for item in recent) - min(item.flow_scale for item in recent) < 1e-9
+        and (
+            all(value is None for value in thresholds)
+            or (
+                all(value is not None for value in thresholds)
+                and max(float(value) for value in thresholds if value is not None)
+                - min(float(value) for value in thresholds if value is not None)
+                < 1e-9
+            )
+        )
+        and max(numeric_counts) - min(numeric_counts) <= count_tolerance
+        and max(item.actual_stars for item in recent) - min(item.actual_stars for item in recent)
+        <= 0.05
+    )
+
+
+def _calibrated_tier_threshold(
+    model_root: Path | None,
+    profile: StandardDifficulty,
+) -> float:
+    from osumapper.training.config import prediction_threshold
+    from osumapper.training.storage import read_json
+    from osumapper.training.trainer import default_model_root
+
+    requested = (model_root or default_model_root()).expanduser().resolve()
+    root = requested.parent if requested.suffix.casefold() == ".keras" else requested
+    config = read_json(root / "config.json", default=None)
+    if not isinstance(config, dict):
+        raise InputError(f"Modern model configuration is missing under {root}.")
+    return prediction_threshold(
+        config,
+        difficulty_tier=profile.key,
+        target_density=profile.target_density,
+    )
+
+
+def _next_plateau_threshold(current: float, target_stars: float, actual_stars: float) -> float:
+    """Move the probability cutoff toward a denser or sparser rhythm."""
+
+    if actual_stars < target_stars:
+        factor = max(0.65, min(0.92, actual_stars / max(target_stars, 0.1)))
+        return max(0.05, current * factor)
+    factor = max(0.65, min(0.92, target_stars / max(actual_stars, 0.1)))
+    return min(0.99, current + (1.0 - current) * (1.0 - factor))
+
+
 def _generate_full_set_difficulty(
     document: BeatmapDocument,
     audio: Path,
@@ -208,8 +278,16 @@ def _generate_full_set_difficulty(
     best: tuple[BeatmapDocument, float, float, float, int] | None = None
     history: list[CalibrationAttempt] = []
     fine_density: float | None = None
+    rhythm_threshold = base_config.rhythm_threshold
+    threshold_adjusted = False
     for attempt in range(1, max_attempts + 1):
-        phase = "fine-spacing" if fine_density is not None else "coarse-density"
+        phase = (
+            "fine-spacing"
+            if fine_density is not None
+            else "coarse-threshold"
+            if threshold_adjusted
+            else "coarse-density"
+        )
         progress(
             f"Generating {profile.label} {profile.default_stars:.2f}★ "
             f"(precision {star_precision:.3f}★, {phase}, attempt {attempt}/{max_attempts}, "
@@ -221,6 +299,7 @@ def _generate_full_set_difficulty(
             difficulty_tier=profile.key,
             target_stars=profile.default_stars,
             target_density=density,
+            rhythm_threshold=rhythm_threshold,
             enforce_star_target=False,
             flow_scale=flow_scale,
         )
@@ -234,6 +313,10 @@ def _generate_full_set_difficulty(
         )
         actual_stars = calculate_standard_stars(generated)
         error = abs(actual_stars - profile.default_stars)
+        object_count = sum(
+            bool(line.strip()) and not line.lstrip().startswith("//")
+            for line in generated.sections().get("HitObjects", [])
+        )
         history.append(
             CalibrationAttempt(
                 attempt=attempt,
@@ -242,6 +325,8 @@ def _generate_full_set_difficulty(
                 flow_scale=flow_scale,
                 actual_stars=actual_stars,
                 star_error=error,
+                object_count=object_count,
+                rhythm_threshold=rhythm_threshold,
             )
         )
         if best is None or error < abs(best[1] - profile.default_stars):
@@ -261,12 +346,39 @@ def _generate_full_set_difficulty(
                 requested_precision=star_precision,
                 calibration_history=tuple(history),
             )
-        if fine_density is not None or error <= STAR_TARGET_TOLERANCE:
+        plateaued = fine_density is None and _rhythm_selection_plateaued(history)
+        if plateaued and error > STAR_TARGET_TOLERANCE:
+            current_threshold = (
+                rhythm_threshold
+                if rhythm_threshold is not None
+                else _calibrated_tier_threshold(base_config.modern_model, profile)
+            )
+            next_threshold = _next_plateau_threshold(
+                current_threshold,
+                profile.default_stars,
+                actual_stars,
+            )
+            if abs(next_threshold - current_threshold) > 1e-6:
+                rhythm_threshold = next_threshold
+                threshold_adjusted = True
+                flow_scale = 1.0
+                progress(
+                    f"{profile.label} rhythm plateaued at {object_count} objects; "
+                    f"adjusting probability threshold {current_threshold:.4f} → "
+                    f"{next_threshold:.4f} before spatial fine-tuning"
+                )
+                continue
+        if fine_density is not None or error <= STAR_TARGET_TOLERANCE or plateaued:
             if fine_density is None:
                 fine_density = density
+                reason = (
+                    f"rhythm selection plateaued at {object_count} objects"
+                    if plateaued
+                    else "entered the target star region"
+                )
                 progress(
-                    f"Locking {profile.label} rhythm at density {fine_density:.3f}; "
-                    "fine-tuning only PatternPlanner spacing"
+                    f"Locking {profile.label} rhythm at density {fine_density:.3f} because "
+                    f"{reason}; fine-tuning only PatternPlanner spacing"
                 )
             density = fine_density
             flow_scale = _next_precision_flow(
@@ -385,6 +497,8 @@ def _write_full_set_reports(
                         "phase": item.phase,
                         "density": item.density,
                         "flow_scale": item.flow_scale,
+                        "object_count": item.object_count,
+                        "rhythm_threshold": item.rhythm_threshold,
                         "actual_stars": item.actual_stars,
                         "star_error": item.star_error,
                     }
@@ -423,8 +537,10 @@ def _write_full_set_reports(
             for result in results
         ),
         "precision_calibration": {
-            "algorithm": "two-phase-density-then-spacing-v1",
+            "algorithm": "adaptive-density-threshold-then-spacing-v2",
             "measurement": "rosu-pp-no-mod-stars",
+            "saturated_rhythm_detection": True,
+            "tier_threshold_adjustment": True,
             "rhythm_locked_during_fine_phase": True,
             "most_attempts_used": max(len(result.calibration_history) for result in results),
         },
