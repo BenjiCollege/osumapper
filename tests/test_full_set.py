@@ -20,6 +20,7 @@ from osumapper.errors import InputError
 from osumapper.pipeline import (
     CalibrationAttempt,
     GenerationRequest,
+    _next_bracketed_threshold,
     _next_density,
     _next_full_set_controls,
     _next_plateau_threshold,
@@ -29,6 +30,20 @@ from osumapper.pipeline import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+class FakeStarCalculator:
+    name = "rosu-pp-test"
+    version = "test"
+
+    def __init__(self, values: list[float]) -> None:
+        self._values = iter(values)
+
+    def calculate(self, _source: object) -> float:
+        return next(self._values)
+
+    def close(self) -> None:
+        return None
 
 
 class FullSetTests(unittest.TestCase):
@@ -97,6 +112,15 @@ class FullSetTests(unittest.TestCase):
 
     def test_plateau_threshold_removes_candidates_when_stars_are_too_high(self) -> None:
         self.assertGreater(_next_plateau_threshold(0.84, 4.65, 6.0), 0.84)
+
+    def test_threshold_search_bisects_sparse_and_dense_selections(self) -> None:
+        lower, sparse, dense = _next_bracketed_threshold(0.82, 1.5, 0.9, None, None)
+        self.assertLess(lower, 0.82)
+        midpoint, sparse, dense = _next_bracketed_threshold(lower, 1.5, 2.1, sparse, dense)
+
+        self.assertAlmostEqual(midpoint, (0.82 + lower) / 2.0)
+        self.assertEqual(sparse, 0.82)
+        self.assertEqual(dense, lower)
 
     def test_precision_flow_ignores_nonmonotonic_spacing_measurements(self) -> None:
         history = [
@@ -193,7 +217,10 @@ class FullSetTests(unittest.TestCase):
 
             with (
                 patch("osumapper.pipeline.generate_document", side_effect=fake_generate),
-                patch("osumapper.pipeline.calculate_standard_stars", side_effect=targets),
+                patch(
+                    "osumapper.pipeline.resolve_star_calculator",
+                    return_value=FakeStarCalculator(targets),
+                ),
                 patch("osumapper.pipeline.audit_standard_criteria", return_value=audit),
             ):
                 generate_package(
@@ -251,8 +278,8 @@ class FullSetTests(unittest.TestCase):
             with (
                 patch("osumapper.pipeline.generate_document", side_effect=fake_generate) as run,
                 patch(
-                    "osumapper.pipeline.calculate_standard_stars",
-                    side_effect=[4.17, 3.90, 3.50, 3.36],
+                    "osumapper.pipeline.resolve_star_calculator",
+                    return_value=FakeStarCalculator([4.17, 3.90, 3.50, 3.36]),
                 ),
                 patch("osumapper.pipeline.audit_standard_criteria", return_value=audit),
             ):

@@ -1,0 +1,59 @@
+{
+  "format": 1,
+  "restore": {
+    "C:\\SELF PROJECTS\\osumapper\\osumapper\\tools\\lazer-difficulty\\OsuMapper.LazerDifficulty.csproj": {}
+  },
+  "projects": {
+    "C:\\SELF PROJECTS\\osumapper\\osumapper\\tools\\lazer-difficulty\\OsuMapper.LazerDifficulty.csproj": {
+      "version": "1.0.0",
+      "restore": {
+        "projectUniqueName": "C:\\SELF PROJECTS\\osumapper\\osumapper\\tools\\lazer-difficulty\\OsuMapper.LazerDifficulty.csproj",
+        "projectName": "OsuMapper.LazerDifficulty",
+        "projectPath": "C:\\SELF PROJECTS\\osumapper\\osumapper\\tools\\lazer-difficulty\\OsuMapper.LazerDifficulty.csproj",
+        "packagesPath": "C:\\SELF PROJECTS\\osumapper\\osumapper\\.bootstrap\\dotnet-packages",
+        "outputPath": "C:\\SELF PROJECTS\\osumapper\\osumapper\\tools\\lazer-difficulty\\obj\\",
+        "projectStyle": "PackageReference",
+        "configFilePaths": [
+          "C:\\SELF PROJECTS\\osumapper\\osumapper\\tools\\lazer-difficulty\\NuGet.Config"
+        ],
+        "originalTargetFrameworks": [
+          "net8.0"
+        ],
+        "frameworks": {
+          "net8.0": {
+            "targetAlias": "net8.0",
+            "projectReferences": {}
+          }
+        },
+        "warningProperties": {
+          "allWarningsAsErrors": true,
+          "warnAsError": [
+            "NU1605"
+          ]
+        }
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "imports": [
+            "net461",
+            "net462",
+            "net47",
+            "net471",
+            "net472",
+            "net48",
+            "net481"
+          ],
+          "assetTargetFallback": true,
+          "warn": true,
+          "frameworkReferences": {
+            "Microsoft.NETCore.App": {
+              "privateAssets": "all"
+            }
+          },
+          "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.100/PortableRuntimeIdentifierGraph.json"
+        }
+      }
+    }
+  }
+}

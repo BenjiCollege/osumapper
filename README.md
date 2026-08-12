@@ -112,8 +112,19 @@ Conformer-v4 trains and generates osu!standard only. Its model-level difficulty
 input contains exactly two values: the requested no-mod star rating and the fixed
 difficulty tier. OD, AR, CS, density, taiko, catch, and mania are not V4 model
 conditioning inputs. Map difficulty settings are applied from the selected profile,
-while [`rosu-pp-py`](https://pypi.org/project/rosu-pp-py/) calculates the real
-no-mod standard star value used for dataset labels and generated-output validation.
+and generation calibration uses the osu!standard difficulty calculator from the user's
+installed osu!lazer build. This keeps generated labels, pass/fail decisions, and
+quality reports aligned with the client that will import the map. The locked
+[`rosu-pp-py`](https://pypi.org/project/rosu-pp-py/) calculator remains available as
+a reproducible legacy fallback and for historical dataset labels; it must not be
+treated as exact parity when it predates the installed lazer ruleset.
+
+The default `--star-calculator auto` selects installed lazer and falls back to rosu
+only when lazer or .NET 8 cannot be found. Use `--star-calculator lazer` to require
+current-client parity and fail instead of falling back. The first run builds a small
+local, cached .NET bridge under `.bootstrap/`; it reads the installed ruleset
+assemblies without modifying osu!lazer's files or database. WSL can use the Windows
+osu!lazer and Windows .NET installation automatically.
 
 | Tier | Accepted star range | Default target |
 |---|---:|---:|
@@ -123,6 +134,10 @@ no-mod standard star value used for dataset labels and generated-output validati
 | Insane | 4.0★–5.29★ | 4.65★ |
 | Expert | 5.3★–6.49★ | 5.90★ |
 | Expert+ | 6.5★ and above | 7.00★ |
+
+These bands still match the current official difficulty categories. Do not shift the
+bands or apply a global multiplier to compensate for calculator changes; calibrate
+each generated map with the installed lazer ruleset instead.
 
 Choose the tier and an exact target inside that tier:
 
@@ -141,13 +156,16 @@ from claiming a difficulty the map did not actually achieve.
 
 FullSet-v1 analyzes/caches the source audio in one isolated workspace, runs the
 selected star-conditioned model for all six fixed targets, and writes exactly six `.osu`
-files with one shared audio file. Precision calibration uses up to 16 bounded
+files with one shared audio file. Precision calibration uses up to 24 bounded
 attempts per tier by default. Its coarse phase adjusts density, detects when the
 model's selected rhythm has saturated, and then adapts the tier probability
-threshold when density alone cannot add or remove objects. After the measured result
-enters the valid target region, it locks the selected rhythm timestamps and
-fine-tunes only PatternPlanner spacing. Every decision, object count, and threshold
-is recorded in the full-set quality report. Repeated fine passes reuse the cached
+threshold when density alone cannot add or remove objects. It bisects bracketed
+probability thresholds to find intermediate object selections. After the measured
+result enters the valid target region, it locks the selected rhythm timestamps and
+fine-tunes PatternPlanner spacing. If spacing reaches its useful boundary, it unlocks
+rhythm and resumes threshold search instead of repeating an identical map. Every
+decision, object count, and threshold is recorded in the full-set quality report.
+Repeated fine passes reuse the cached
 rhythm prediction. Referenced background, video, and
 storyboard assets are preserved for explicit `.osu` input; audio-only input receives
 a neutral packaged background. Export is refused unless every difficulty is inside
@@ -158,15 +176,16 @@ is acceptable. Exact `0.000★` cannot be guaranteed because object counts and
 serialized coordinates are discrete.
 
 ```powershell
-uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --flow-engine deterministic --full-set --star-precision 0.03 --calibration-attempts 16 --output output/song-full-set.osz --open
+uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v5-full-set --flow-engine deterministic --full-set --star-calculator lazer --star-precision 0.03 --calibration-attempts 24 --output output/song-full-set.osz --open
 ```
 
 The command writes `song-full-set.full-set.json` plus one
 `song-full-set.<tier>.criteria.json` report per difficulty. Each report includes
 circle, slider, and spinner counts plus heuristic jump, burst, stream, stack, and
 position-diversity measurements. The set report records every density/spacing
-attempt, its measured no-mod star rating, achieved error, calibration phase, and
-whether every requested precision target was met. FullSet-v1 runs the selected
+attempt, its installed-lazer no-mod star rating, achieved error, calibration phase,
+calculator build, legacy rosu comparison value, and whether every requested precision
+target was met. FullSet-v1 runs the selected
 model independently for each tier;
 learned event nesting and one-pass shared inference require Conformer-v5. The
 output is a local draft and is not eligible for ranking.
@@ -322,7 +341,8 @@ The most useful `generate` options are:
 | `--target-stars NUMBER` | Fix the requested no-mod standard star target inside the selected tier. |
 | `--full-set` | Generate all six fixed standard tiers in one validated `.osz`. |
 | `--star-precision NUMBER` | Require each calibrated single or full-set tier to land within this many stars; default `0.03`, range `0.001`–`0.25`. |
-| `--calibration-attempts INTEGER` | Bound coarse and fine precision attempts per tier; default `16`, range `1`–`30`. |
+| `--calibration-attempts INTEGER` | Bound coarse and fine precision attempts per tier; default `24`, range `1`–`30`. |
+| `--star-calculator auto\|lazer\|rosu` | Use installed lazer when available (default), require installed-lazer parity, or explicitly use the legacy rosu approximation. |
 | `--seed INTEGER` | Set the deterministic seed; the default is `2026`. |
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
 | `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |
@@ -1080,6 +1100,25 @@ restart the terminal, and run `uv sync --locked` again.
 
 Run `uv run osumapper doctor`. Generation still works without Lazer, but omit
 `--open` and import the resulting `.osz` manually.
+
+Calibrated generation also needs .NET 8 to run the installed-lazer star calculator.
+`--star-calculator auto` falls back to the locked legacy calculator when either is
+missing. Use `--star-calculator lazer` when silent fallback is unacceptable.
+
+### osu!lazer shows lower stars than the generated difficulty name
+
+Regenerate the package with `--star-calculator lazer`. Older osumapper builds used
+the locked rosu calculator, whose ruleset snapshot can predate a newer osu!lazer star
+rework. Do not apply a fixed multiplier: the difference depends on the map and tier.
+New quality reports store the exact lazer build plus the legacy value and delta.
+
+### Strict star calibration exhausts its attempts
+
+Use the current default of 24 attempts. Calibration-v3 bisects probability thresholds
+when density stops changing the selected objects and unlocks rhythm when spatial
+scaling reaches a boundary. Some songs still have no serialized pattern within an
+extremely tight discrete margin; after reviewing the closest result, relax
+`--star-precision` from `0.03` to `0.05` rather than accepting a mislabeled package.
 
 ### The beatmap references missing audio
 

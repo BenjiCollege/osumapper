@@ -65,7 +65,8 @@ class GenerationOptions:
     target_stars: float = 3.35
     full_set: bool = False
     star_precision: float = 0.03
-    calibration_attempts: int = 16
+    calibration_attempts: int = 24
+    star_calculator: str = "auto"
     bpm: float | None = None
     offset_ms: int | None = None
     key_count: int = 4
@@ -177,6 +178,8 @@ def build_generate_command(source: Path, output: Path, options: GenerationOption
         options.rhythm_engine,
         "--keys",
         str(options.key_count),
+        "--star-calculator",
+        options.star_calculator,
     ]
     if options.mode != "auto":
         command.extend(("--mode", options.mode))
@@ -335,7 +338,8 @@ class OsumapperStudio:
         self.difficulty_tier.trace_add("write", self._sync_target_stars)
         self.full_set = tk.BooleanVar(value=False)
         self.star_precision = tk.StringVar(value="0.03")
-        self.calibration_attempts = tk.StringVar(value="16")
+        self.calibration_attempts = tk.StringVar(value="24")
+        self.star_calculator = tk.StringVar(value="auto")
         self.bpm = tk.StringVar()
         self.offset = tk.StringVar()
         self.keys = tk.StringVar(value="4")
@@ -486,11 +490,18 @@ class OsumapperStudio:
         ).pack(anchor="w", pady=(4, 6))
         self._entry_row(settings, "Maximum star error", self.star_precision)
         self._entry_row(settings, "Calibration attempts", self.calibration_attempts)
+        self._combo_row(
+            settings,
+            "Star calculator",
+            self.star_calculator,
+            ("auto", "lazer", "rosu"),
+        )
         ttk.Label(
             settings,
             text=(
                 "Precision automation first calibrates density, then locks the rhythm "
-                "and fine-tunes PatternPlanner spacing against measured rosu-pp stars."
+                "and fine-tunes PatternPlanner spacing against your installed osu!lazer. "
+                "The rosu option is a legacy approximation for systems without lazer."
             ),
             style="Muted.TLabel",
             wraplength=390,
@@ -957,6 +968,7 @@ class OsumapperStudio:
             full_set=self.full_set.get(),
             star_precision=star_precision,
             calibration_attempts=calibration_attempts,
+            star_calculator=self.star_calculator.get(),
             bpm=self._optional_float(self.bpm.get(), "BPM"),
             offset_ms=offset,
             key_count=keys,

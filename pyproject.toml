@@ -55,6 +55,9 @@ dev = [
 [tool.hatch.build.targets.wheel]
 packages = ["src/osumapper"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"tools/lazer-difficulty" = "osumapper/_lazer_difficulty"
+
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]

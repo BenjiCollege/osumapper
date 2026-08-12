@@ -53,6 +53,7 @@ class GenerationConfig:
     target_stars: float | None = None
     enforce_star_target: bool = True
     flow_scale: float = 1.0
+    external_star_calibration: bool = False
 
 
 def configure_determinism(seed: int) -> None:

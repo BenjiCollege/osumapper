@@ -436,7 +436,7 @@ def generate_document(
         f"{preset.name}-modern-rhythm" if config.rhythm_engine == "modern" else preset.name
     )
     generated = document.with_hit_objects(objects, preset=preset_label, seed=config.seed)
-    if requested_difficulty is not None:
+    if requested_difficulty is not None and not config.external_star_calibration:
         profile, target_stars = requested_difficulty
         actual_stars = calculate_standard_stars(generated)
         target_missed = (

@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import json
 import platform
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -161,6 +162,15 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "maximum coarse and fine calibration attempts per difficulty "
             f"(default: {FULL_SET_DEFAULT_MAX_ATTEMPTS})"
+        ),
+    )
+    generate.add_argument(
+        "--star-calculator",
+        choices=("auto", "lazer", "rosu"),
+        default="auto",
+        help=(
+            "star-rating authority: installed osu!lazer when available (auto), require "
+            "installed lazer, or the legacy rosu approximation"
         ),
     )
     generate.add_argument("--bpm", type=float, help="tempo for audio-only input")
@@ -456,6 +466,7 @@ def _generate(args: argparse.Namespace) -> int:
             full_set=args.full_set,
             star_precision=args.star_precision,
             calibration_attempts=args.calibration_attempts,
+            star_calculator=args.star_calculator,
             audio=args.audio,
             bpm=args.bpm,
             offset_ms=args.offset,
@@ -471,12 +482,18 @@ def _generate(args: argparse.Namespace) -> int:
 
 def _doctor() -> int:
     root = project_root()
+    lazer = find_lazer_executable()
+    dotnet = shutil.which("dotnet") or shutil.which("dotnet.exe")
     checks: dict[str, Any] = {
         "osumapper": __version__,
         "project_root": str(root),
         "python": platform.python_version(),
         "python_supported": sys.version_info[:2] == (3, 12),
-        "lazer": str(find_lazer_executable() or "not found"),
+        "lazer": str(lazer or "not found"),
+        "dotnet": str(dotnet or "not found"),
+        "generation_star_calculator": (
+            "osu!lazer-installed" if lazer is not None and dotnet else "rosu-pp-py-legacy-fallback"
+        ),
         "legacy_models": len(legacy_model_paths()),
         "dependencies": {
             name: bool(importlib.util.find_spec(name))

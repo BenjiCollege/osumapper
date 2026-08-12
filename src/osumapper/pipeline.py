@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -12,7 +13,9 @@ from osumapper.difficulty import (
     STANDARD_DIFFICULTIES,
     STAR_TARGET_TOLERANCE,
     StandardDifficulty,
+    apply_standard_difficulty,
     calculate_standard_stars,
+    label_standard_difficulty,
     resolve_standard_difficulty,
 )
 from osumapper.engine import ensure_preview_time, generate_document
@@ -20,11 +23,12 @@ from osumapper.errors import GenerationError, InputError
 from osumapper.lazer import open_in_lazer
 from osumapper.package import generated_map_name, validate_osz, write_osz
 from osumapper.presets import get_preset
+from osumapper.star_calculator import StandardStarCalculator, resolve_star_calculator
 from osumapper.training.storage import write_json
 from osumapper.workspace import SUPPORTED_AUDIO, prepare_source
 
 Progress = Callable[[str], None]
-FULL_SET_DEFAULT_MAX_ATTEMPTS = 16
+FULL_SET_DEFAULT_MAX_ATTEMPTS = 24
 FULL_SET_DEFAULT_STAR_PRECISION = 0.03
 FULL_SET_MAX_MEAN_STAR_ERROR = 0.15
 _GAMEPLAY_BLOCKING_CRITERIA = {
@@ -63,6 +67,7 @@ class GenerationRequest:
     enforce_star_target: bool = True
     star_precision: float = FULL_SET_DEFAULT_STAR_PRECISION
     calibration_attempts: int = FULL_SET_DEFAULT_MAX_ATTEMPTS
+    star_calculator: str = "auto"
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +92,7 @@ class FullSetDifficultyResult:
     attempts: int
     requested_precision: float
     calibration_history: tuple[CalibrationAttempt, ...]
+    legacy_stars: float | None = None
 
 
 def _base_config(
@@ -155,7 +161,18 @@ def _next_precision_flow(
     interpolation converges much faster than another density adjustment.
     """
 
-    same_rhythm = [item for item in history if abs(item.density - density) < 1e-9]
+    current_threshold = history[-1].rhythm_threshold
+    same_rhythm = [
+        item
+        for item in history
+        if abs(item.density - density) < 1e-9
+        and (
+            item.rhythm_threshold is None
+            if current_threshold is None
+            else item.rhythm_threshold is not None
+            and abs(item.rhythm_threshold - current_threshold) < 1e-9
+        )
+    ]
     below = sorted(
         (item for item in same_rhythm if item.actual_stars <= target_stars),
         key=lambda item: target_stars - item.actual_stars,
@@ -263,6 +280,26 @@ def _next_plateau_threshold(current: float, target_stars: float, actual_stars: f
     return min(0.99, current + (1.0 - current) * (1.0 - factor))
 
 
+def _next_bracketed_threshold(
+    current: float,
+    target_stars: float,
+    actual_stars: float,
+    sparse_threshold: float | None,
+    dense_threshold: float | None,
+) -> tuple[float, float | None, float | None]:
+    """Bisect probability cutoffs once both sides of the star target are known."""
+
+    if actual_stars < target_stars:
+        sparse_threshold = current
+    else:
+        dense_threshold = current
+    if sparse_threshold is not None and dense_threshold is not None:
+        candidate = (sparse_threshold + dense_threshold) / 2.0
+    else:
+        candidate = _next_plateau_threshold(current, target_stars, actual_stars)
+    return max(0.05, min(0.99, candidate)), sparse_threshold, dense_threshold
+
+
 def _generate_full_set_difficulty(
     document: BeatmapDocument,
     audio: Path,
@@ -273,6 +310,7 @@ def _generate_full_set_difficulty(
     star_precision: float,
     max_attempts: int,
     progress: Progress,
+    star_calculator: StandardStarCalculator,
     *,
     target_stars: float | None = None,
 ) -> FullSetDifficultyResult:
@@ -284,6 +322,8 @@ def _generate_full_set_difficulty(
     fine_density: float | None = None
     rhythm_threshold = base_config.rhythm_threshold
     threshold_adjusted = False
+    sparse_threshold: float | None = None
+    dense_threshold: float | None = None
     for attempt in range(1, max_attempts + 1):
         phase = (
             "fine-spacing"
@@ -306,6 +346,7 @@ def _generate_full_set_difficulty(
             rhythm_threshold=rhythm_threshold,
             enforce_star_target=False,
             flow_scale=flow_scale,
+            external_star_calibration=True,
         )
         generated = generate_document(
             document,
@@ -315,7 +356,8 @@ def _generate_full_set_difficulty(
             config,
             progress,
         )
-        actual_stars = calculate_standard_stars(generated)
+        generated = apply_standard_difficulty(generated, profile)
+        actual_stars = star_calculator.calculate(generated)
         error = abs(actual_stars - target)
         object_count = sum(
             bool(line.strip()) and not line.lstrip().startswith("//")
@@ -336,6 +378,12 @@ def _generate_full_set_difficulty(
         if best is None or error < abs(best[1] - target):
             best = (generated, actual_stars, density, flow_scale, attempt)
         if profile.contains(actual_stars) and error <= star_precision:
+            generated = label_standard_difficulty(generated, profile, actual_stars)
+            legacy_stars = (
+                actual_stars
+                if star_calculator.name.startswith("rosu-pp")
+                else calculate_standard_stars(generated)
+            )
             progress(
                 f"Precision target reached for {profile.label}: error {error:.4f}★ "
                 f"within {star_precision:.3f}★"
@@ -349,6 +397,7 @@ def _generate_full_set_difficulty(
                 attempts=attempt,
                 requested_precision=star_precision,
                 calibration_history=tuple(history),
+                legacy_stars=legacy_stars,
             )
         plateaued = fine_density is None and _rhythm_selection_plateaued(history)
         if plateaued and error > STAR_TARGET_TOLERANCE:
@@ -357,10 +406,12 @@ def _generate_full_set_difficulty(
                 if rhythm_threshold is not None
                 else _calibrated_tier_threshold(base_config.modern_model, profile)
             )
-            next_threshold = _next_plateau_threshold(
+            next_threshold, sparse_threshold, dense_threshold = _next_bracketed_threshold(
                 current_threshold,
                 target,
                 actual_stars,
+                sparse_threshold,
+                dense_threshold,
             )
             if abs(next_threshold - current_threshold) > 1e-6:
                 rhythm_threshold = next_threshold
@@ -371,6 +422,24 @@ def _generate_full_set_difficulty(
                     f"adjusting probability threshold {current_threshold:.4f} → "
                     f"{next_threshold:.4f} before spatial fine-tuning"
                 )
+                continue
+        if threshold_adjusted and fine_density is None and error > STAR_TARGET_TOLERANCE:
+            assert rhythm_threshold is not None
+            next_threshold, sparse_threshold, dense_threshold = _next_bracketed_threshold(
+                rhythm_threshold,
+                target,
+                actual_stars,
+                sparse_threshold,
+                dense_threshold,
+            )
+            if abs(next_threshold - rhythm_threshold) > 1e-5:
+                progress(
+                    f"Bisecting {profile.label} probability threshold "
+                    f"{rhythm_threshold:.4f} → {next_threshold:.4f} to find an intermediate "
+                    "rhythm selection"
+                )
+                rhythm_threshold = next_threshold
+                flow_scale = 1.0
                 continue
         if fine_density is not None or error <= STAR_TARGET_TOLERANCE or plateaued:
             if fine_density is None:
@@ -385,11 +454,36 @@ def _generate_full_set_difficulty(
                     f"{reason}; fine-tuning only PatternPlanner spacing"
                 )
             density = fine_density
-            flow_scale = _next_precision_flow(
+            next_flow_scale = _next_precision_flow(
                 history,
                 density=density,
                 target_stars=target,
             )
+            if abs(next_flow_scale - flow_scale) < 1e-6 and error > star_precision:
+                current_threshold = (
+                    rhythm_threshold
+                    if rhythm_threshold is not None
+                    else _calibrated_tier_threshold(base_config.modern_model, profile)
+                )
+                next_threshold, sparse_threshold, dense_threshold = _next_bracketed_threshold(
+                    current_threshold,
+                    target,
+                    actual_stars,
+                    sparse_threshold,
+                    dense_threshold,
+                )
+                if abs(next_threshold - current_threshold) > 1e-5:
+                    progress(
+                        f"{profile.label} spacing reached its useful boundary at "
+                        f"{flow_scale:.3f}×; unlocking rhythm and adjusting probability "
+                        f"threshold {current_threshold:.4f} → {next_threshold:.4f}"
+                    )
+                    rhythm_threshold = next_threshold
+                    threshold_adjusted = True
+                    fine_density = None
+                    flow_scale = 1.0
+                    continue
+            flow_scale = next_flow_scale
         else:
             fine_density = None
             density, flow_scale = _next_full_set_controls(
@@ -488,6 +582,7 @@ def _write_full_set_reports(
     results: list[FullSetDifficultyResult],
     reports: dict[str, dict[str, Any]],
     progress: Progress,
+    star_calculator: StandardStarCalculator,
 ) -> None:
     timing_sections = {
         tuple(result.document.sections().get("TimingPoints", [])) for result in results
@@ -503,6 +598,12 @@ def _write_full_set_reports(
                 "label": result.profile.label,
                 "target_stars": result.profile.default_stars,
                 "actual_stars": result.actual_stars,
+                "legacy_rosu_stars": result.legacy_stars,
+                "legacy_to_authoritative_delta": (
+                    None
+                    if result.legacy_stars is None
+                    else result.actual_stars - result.legacy_stars
+                ),
                 "star_error": abs(result.actual_stars - result.profile.default_stars),
                 "density": result.density,
                 "flow_scale": result.flow_scale,
@@ -546,10 +647,13 @@ def _write_full_set_reports(
             for result in results
         ),
         "precision_calibration": {
-            "algorithm": "adaptive-density-threshold-then-spacing-v2",
-            "measurement": "rosu-pp-no-mod-stars",
+            "algorithm": "adaptive-density-threshold-then-spacing-v3",
+            "measurement": star_calculator.name,
+            "calculator_version": star_calculator.version,
+            "authoritative_for_installed_lazer": star_calculator.name == "osu!lazer-installed",
             "saturated_rhythm_detection": True,
             "tier_threshold_adjustment": True,
+            "threshold_bisection": True,
             "rhythm_locked_during_fine_phase": True,
             "most_attempts_used": max(len(result.calibration_history) for result in results),
         },
@@ -580,6 +684,8 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         raise InputError(f"Star precision must be between 0.001 and {STAR_TARGET_TOLERANCE:.2f}.")
     if not 1 <= request.calibration_attempts <= 30:
         raise InputError("Calibration attempts must be between 1 and 30.")
+    if request.star_calculator not in {"auto", "lazer", "rosu"}:
+        raise InputError("Star calculator must be auto, lazer, or rosu.")
     if request.flow_engine == "placement" and request.rhythm_engine != "modern":
         raise InputError("Placement-v1 requires --rhythm-engine modern.")
     if request.full_set:
@@ -604,16 +710,27 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
     criteria_report: dict[str, Any] | None = None
     full_set_results: list[FullSetDifficultyResult] = []
     full_set_reports: dict[str, dict[str, Any]] = {}
+    star_calculator: StandardStarCalculator | None = None
     progress("Opening input in an isolated workspace")
-    with prepare_source(
-        source,
-        audio=request.audio,
-        difficulty=request.difficulty,
-        mode=request.mode,
-        bpm=request.bpm,
-        offset_ms=request.offset_ms,
-        key_count=request.key_count,
-    ) as workspace:
+    with ExitStack() as stack:
+        workspace = stack.enter_context(
+            prepare_source(
+                source,
+                audio=request.audio,
+                difficulty=request.difficulty,
+                mode=request.mode,
+                bpm=request.bpm,
+                offset_ms=request.offset_ms,
+                key_count=request.key_count,
+            )
+        )
+        if requested_difficulty is not None or request.full_set:
+            star_calculator = resolve_star_calculator(
+                request.star_calculator,
+                progress=progress,
+            )
+            stack.callback(star_calculator.close)
+            progress(f"Using {star_calculator.name} for calibrated no-mod star measurement")
         workspace.document = ensure_preview_time(workspace.document, workspace.audio)
         if (requested_difficulty is not None or request.full_set) and (
             workspace.document.mode is not GameMode.STANDARD
@@ -644,6 +761,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
                     request.star_precision,
                     request.calibration_attempts,
                     progress,
+                    star_calculator,
                 )
                 generated_path = _unique_generated_path(
                     workspace.document.path.parent,
@@ -712,6 +830,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
                     request.star_precision,
                     request.calibration_attempts,
                     progress,
+                    star_calculator,
                     target_stars=target_stars,
                 )
                 generated = calibrated_result.document
@@ -734,10 +853,17 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
                     map_label=generated_path.name,
                 )
                 if calibrated_result is not None:
+                    assert star_calculator is not None
                     criteria_report["star_calibration"] = {
-                        "algorithm": "adaptive-density-threshold-then-spacing-v2",
+                        "algorithm": "adaptive-density-threshold-then-spacing-v3",
+                        "measurement": star_calculator.name,
+                        "calculator_version": star_calculator.version,
+                        "authoritative_for_installed_lazer": (
+                            star_calculator.name == "osu!lazer-installed"
+                        ),
                         "target_stars": requested_difficulty[1],
                         "actual_stars": calibrated_result.actual_stars,
+                        "legacy_rosu_stars": calibrated_result.legacy_stars,
                         "star_error": abs(calibrated_result.actual_stars - requested_difficulty[1]),
                         "requested_star_precision": calibrated_result.requested_precision,
                         "precision_target_met": True,
@@ -756,6 +882,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
             progress("Building deterministic .osz package")
             write_osz(workspace.root, output, exclude=excluded)
     if request.full_set:
+        assert star_calculator is not None
         _write_full_set_reports(
             output,
             source,
@@ -763,6 +890,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
             full_set_results,
             full_set_reports,
             progress,
+            star_calculator,
         )
     elif criteria_report is not None:
         report_path = output.with_name(f"{output.stem}.criteria.json")
