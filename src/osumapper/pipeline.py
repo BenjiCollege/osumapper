@@ -24,8 +24,8 @@ from osumapper.training.storage import write_json
 from osumapper.workspace import SUPPORTED_AUDIO, prepare_source
 
 Progress = Callable[[str], None]
-FULL_SET_MAX_ATTEMPTS = 6
-FULL_SET_PREFERRED_TIER_ERROR = 0.18
+FULL_SET_DEFAULT_MAX_ATTEMPTS = 16
+FULL_SET_DEFAULT_STAR_PRECISION = 0.03
 FULL_SET_MAX_MEAN_STAR_ERROR = 0.15
 _GAMEPLAY_BLOCKING_CRITERIA = {
     "objects_on_same_tick",
@@ -60,6 +60,18 @@ class GenerationRequest:
     key_count: int = 4
     open_in_lazer: bool = False
     full_set: bool = False
+    star_precision: float = FULL_SET_DEFAULT_STAR_PRECISION
+    calibration_attempts: int = FULL_SET_DEFAULT_MAX_ATTEMPTS
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationAttempt:
+    attempt: int
+    phase: str
+    density: float
+    flow_scale: float
+    actual_stars: float
+    star_error: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,6 +82,8 @@ class FullSetDifficultyResult:
     density: float
     flow_scale: float
     attempts: int
+    requested_precision: float
+    calibration_history: tuple[CalibrationAttempt, ...]
 
 
 def _base_config(
@@ -122,6 +136,60 @@ def _next_full_set_controls(
     return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
 
 
+def _next_precision_flow(
+    history: list[CalibrationAttempt],
+    *,
+    density: float,
+    target_stars: float,
+) -> float:
+    """Choose the next spacing scale using local measured star results.
+
+    Density remains fixed during this phase, which preserves the model-selected
+    rhythm timestamps. Once two measurements bracket the target, linear
+    interpolation converges much faster than another density adjustment.
+    """
+
+    same_rhythm = [item for item in history if abs(item.density - density) < 1e-9]
+    below = sorted(
+        (item for item in same_rhythm if item.actual_stars <= target_stars),
+        key=lambda item: target_stars - item.actual_stars,
+    )
+    above = sorted(
+        (item for item in same_rhythm if item.actual_stars >= target_stars),
+        key=lambda item: item.actual_stars - target_stars,
+    )
+    candidate: float | None = None
+    if below and above and below[0].actual_stars != above[0].actual_stars:
+        low, high = below[0], above[0]
+        fraction = (target_stars - low.actual_stars) / (high.actual_stars - low.actual_stars)
+        candidate = low.flow_scale + fraction * (high.flow_scale - low.flow_scale)
+    elif len(same_rhythm) >= 2:
+        first, second = sorted(same_rhythm, key=lambda item: item.attempt)[-2:]
+        star_delta = second.actual_stars - first.actual_stars
+        flow_delta = second.flow_scale - first.flow_scale
+        if abs(star_delta) >= 1e-4 and abs(flow_delta) >= 1e-5:
+            candidate = second.flow_scale + (
+                (target_stars - second.actual_stars) * flow_delta / star_delta
+            )
+    if candidate is None:
+        latest = same_rhythm[-1]
+        ratio = target_stars / max(0.1, latest.actual_stars)
+        candidate = latest.flow_scale * max(0.82, min(1.22, ratio**1.5))
+
+    candidate = max(0.45, min(2.0, candidate))
+    # Prevent rounding back onto an already measured point. Step toward the target
+    # in small increments while staying inside the PatternPlanner scale bounds.
+    measured = {round(item.flow_scale, 6) for item in same_rhythm}
+    if round(candidate, 6) in measured:
+        direction = 1.0 if same_rhythm[-1].actual_stars < target_stars else -1.0
+        for step in (0.01, 0.02, 0.04, 0.08):
+            alternative = max(0.45, min(2.0, candidate + direction * step))
+            if round(alternative, 6) not in measured:
+                candidate = alternative
+                break
+    return candidate
+
+
 def _generate_full_set_difficulty(
     document: BeatmapDocument,
     audio: Path,
@@ -129,16 +197,21 @@ def _generate_full_set_difficulty(
     preset: PresetSpec,
     base_config: GenerationConfig,
     profile: StandardDifficulty,
+    star_precision: float,
+    max_attempts: int,
     progress: Progress,
 ) -> FullSetDifficultyResult:
     density = profile.target_density
     flow_scale = 1.0
     best: tuple[BeatmapDocument, float, float, float, int] | None = None
-    for attempt in range(1, FULL_SET_MAX_ATTEMPTS + 1):
+    history: list[CalibrationAttempt] = []
+    fine_density: float | None = None
+    for attempt in range(1, max_attempts + 1):
+        phase = "fine-spacing" if fine_density is not None else "coarse-density"
         progress(
             f"Generating {profile.label} {profile.default_stars:.2f}★ "
-            f"(attempt {attempt}/{FULL_SET_MAX_ATTEMPTS}, density {density:.3f}, "
-            f"spacing {flow_scale:.3f}×)"
+            f"(precision {star_precision:.3f}★, {phase}, attempt {attempt}/{max_attempts}, "
+            f"density {density:.3f}, spacing {flow_scale:.3f}×)"
         )
         config = replace(
             base_config,
@@ -159,9 +232,23 @@ def _generate_full_set_difficulty(
         )
         actual_stars = calculate_standard_stars(generated)
         error = abs(actual_stars - profile.default_stars)
+        history.append(
+            CalibrationAttempt(
+                attempt=attempt,
+                phase=phase,
+                density=density,
+                flow_scale=flow_scale,
+                actual_stars=actual_stars,
+                star_error=error,
+            )
+        )
         if best is None or error < abs(best[1] - profile.default_stars):
             best = (generated, actual_stars, density, flow_scale, attempt)
-        if profile.contains(actual_stars) and error <= FULL_SET_PREFERRED_TIER_ERROR:
+        if profile.contains(actual_stars) and error <= star_precision:
+            progress(
+                f"Precision target reached for {profile.label}: error {error:.4f}★ "
+                f"within {star_precision:.3f}★"
+            )
             return FullSetDifficultyResult(
                 profile=profile,
                 document=generated,
@@ -169,36 +256,39 @@ def _generate_full_set_difficulty(
                 density=density,
                 flow_scale=flow_scale,
                 attempts=attempt,
+                requested_precision=star_precision,
+                calibration_history=tuple(history),
             )
-        density, flow_scale = _next_full_set_controls(
-            profile,
-            density,
-            flow_scale,
-            actual_stars,
-        )
+        if fine_density is not None or error <= STAR_TARGET_TOLERANCE:
+            if fine_density is None:
+                fine_density = density
+                progress(
+                    f"Locking {profile.label} rhythm at density {fine_density:.3f}; "
+                    "fine-tuning only PatternPlanner spacing"
+                )
+            density = fine_density
+            flow_scale = _next_precision_flow(
+                history,
+                density=density,
+                target_stars=profile.default_stars,
+            )
+        else:
+            fine_density = None
+            density, flow_scale = _next_full_set_controls(
+                profile,
+                density,
+                flow_scale,
+                actual_stars,
+            )
     assert best is not None
-    best_document, actual_stars, used_density, used_flow_scale, attempts = best
-    if profile.contains(actual_stars) and (
-        abs(actual_stars - profile.default_stars) <= STAR_TARGET_TOLERANCE
-    ):
-        progress(
-            f"Using best valid {profile.label} result {actual_stars:.2f}★ "
-            "after exhausting refinement attempts"
-        )
-        return FullSetDifficultyResult(
-            profile=profile,
-            document=best_document,
-            actual_stars=actual_stars,
-            density=used_density,
-            flow_scale=used_flow_scale,
-            attempts=attempts,
-        )
+    _best_document, actual_stars, used_density, used_flow_scale, _attempts = best
     raise GenerationError(
         f"FullSet-v1 could not reach {profile.label} {profile.default_stars:.2f}★ "
-        f"within ±{STAR_TARGET_TOLERANCE:.2f}★ after {attempts} attempts. "
+        f"within the requested ±{star_precision:.3f}★ after {max_attempts} attempts. "
         f"Best result was {actual_stars:.2f}★ at density {used_density:.3f} and "
         f"spacing {used_flow_scale:.3f}×. "
-        "Preserving the package boundary rather than exporting an inaccurate tier."
+        "Increase --calibration-attempts or relax --star-precision. The package was not "
+        "exported because its measured margin exceeded the requested precision."
     )
 
 
@@ -282,6 +372,22 @@ def _write_full_set_reports(
                 "density": result.density,
                 "flow_scale": result.flow_scale,
                 "attempts": result.attempts,
+                "requested_star_precision": result.requested_precision,
+                "precision_target_met": (
+                    abs(result.actual_stars - result.profile.default_stars)
+                    <= result.requested_precision
+                ),
+                "calibration_history": [
+                    {
+                        "attempt": item.attempt,
+                        "phase": item.phase,
+                        "density": item.density,
+                        "flow_scale": item.flow_scale,
+                        "actual_stars": item.actual_stars,
+                        "star_error": item.star_error,
+                    }
+                    for item in result.calibration_history
+                ],
                 "criteria_summary": reports[result.profile.key]["summary"],
                 "pattern_summary": reports[result.profile.key].get("pattern_summary"),
                 "map_name": generated_map_name(
@@ -309,6 +415,17 @@ def _write_full_set_reports(
         else None,
         "mean_star_error": sum(errors) / len(errors),
         "maximum_star_error": max(errors),
+        "requested_star_precision": max(result.requested_precision for result in results),
+        "all_precision_targets_met": all(
+            abs(result.actual_stars - result.profile.default_stars) <= result.requested_precision
+            for result in results
+        ),
+        "precision_calibration": {
+            "algorithm": "two-phase-density-then-spacing-v1",
+            "measurement": "rosu-pp-no-mod-stars",
+            "rhythm_locked_during_fine_phase": True,
+            "most_attempts_used": max(len(result.calibration_history) for result in results),
+        },
         "difficulty_results": difficulty_rows,
         "rankability": "not-rankable-generated-draft",
         "next_model_milestones": ["conformer-v5-full-set", "placement-v2"],
@@ -332,6 +449,10 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         raise InputError("Rhythm threshold must be between 0 and 1.")
     if request.target_density is not None and not 0 < request.target_density <= 20:
         raise InputError("Target density must be greater than 0 and at most 20.")
+    if not 0.001 <= request.star_precision <= STAR_TARGET_TOLERANCE:
+        raise InputError(f"Star precision must be between 0.001 and {STAR_TARGET_TOLERANCE:.2f}.")
+    if not 1 <= request.calibration_attempts <= 30:
+        raise InputError("Calibration attempts must be between 1 and 30.")
     if request.flow_engine == "placement" and request.rhythm_engine != "modern":
         raise InputError("Placement-v1 requires --rhythm-engine modern.")
     if request.full_set:
@@ -393,6 +514,8 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
                     preset,
                     config,
                     profile,
+                    request.star_precision,
+                    request.calibration_attempts,
                     progress,
                 )
                 generated_path = _unique_generated_path(

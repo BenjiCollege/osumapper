@@ -48,6 +48,10 @@ class ModernRhythmPrediction:
     difficulty_tier: str | None = None
 
 
+_PREDICTION_CACHE_LIMIT = 64
+_prediction_cache: dict[tuple[Any, ...], ModernRhythmPrediction] = {}
+
+
 def _difficulty(
     document: BeatmapDocument,
     target_density: float,
@@ -175,6 +179,21 @@ def predict_modern_rhythm(
         target_density=density,
         difficulty_tier=profile.key if profile is not None else None,
     )
+    cache_key = (
+        str(workspace.resolve()),
+        str(model_path),
+        round(density, 9),
+        round(selected_threshold, 9),
+        profile.key if profile is not None else None,
+        round(selected_stars, 6) if selected_stars is not None else None,
+    )
+    cached = _prediction_cache.get(cache_key)
+    if cached is not None:
+        progress(
+            "Reusing cached modern rhythm selection for fine star calibration "
+            f"({len(cached.timestamps_ms)} timestamps)"
+        )
+        return cached
     grid_config = GridConfig(
         sequence_length=int(config["training"]["sequence_length"]),
         prediction_threshold=selected_threshold,
@@ -227,7 +246,7 @@ def predict_modern_rhythm(
             "Modern rhythm model selected no events. Lower --rhythm-threshold "
             "or train a better model."
         )
-    return ModernRhythmPrediction(
+    result = ModernRhythmPrediction(
         timestamps_ms=np.rint(candidate_times[selected]).astype(int),
         probabilities=probabilities[selected],
         candidate_indices=selected,
@@ -236,3 +255,7 @@ def predict_modern_rhythm(
         target_stars=selected_stars,
         difficulty_tier=profile.key if profile is not None else None,
     )
+    if len(_prediction_cache) >= _PREDICTION_CACHE_LIMIT:
+        _prediction_cache.pop(next(iter(_prediction_cache)))
+    _prediction_cache[cache_key] = result
+    return result

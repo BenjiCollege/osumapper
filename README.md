@@ -139,27 +139,42 @@ filename from claiming a difficulty the map did not actually achieve.
 
 FullSet-v1 analyzes/caches the source audio in one isolated workspace, runs the
 star-conditioned V4 model for all six fixed targets, and writes exactly six `.osu`
-files with one shared audio file. Each tier receives up to four bounded correction
-attempts. Easy and Normal reduce density and spacing together; Expert and Expert+
-adjust spatial strain separately from density so difficulty is not controlled only
-by flooding or starving a map of objects. Referenced background, video, and
+files with one shared audio file. Precision calibration uses up to 16 bounded
+attempts per tier by default. Its coarse phase adjusts density and spacing; after
+the measured result enters the valid target region, it locks V4's selected rhythm
+timestamps and fine-tunes only PatternPlanner spacing. Repeated fine passes reuse
+the cached rhythm prediction. Referenced background, video, and
 storyboard assets are preserved for explicit `.osu` input; audio-only input receives
 a neutral packaged background. Export is refused unless every difficulty is inside
-its band and within 0.25★ of target, mean star error is below 0.15★, timing sections
-are identical, and deterministic gameplay-safety checks pass. FullSet-v1 aims for
-0.18★ per tier during refinement and uses the wider 0.25★ boundary only after all
-six attempts are exhausted.
+its band and within the requested star precision, timing sections are identical,
+and deterministic gameplay-safety checks pass. The default maximum error is
+`0.03★`; the limit can be tightened to `0.001★` when additional calibration time
+is acceptable. Exact `0.000★` cannot be guaranteed because object counts and
+serialized coordinates are discrete.
 
 ```powershell
-uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --flow-engine deterministic --full-set --output output/song-full-set.osz --open
+uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --flow-engine deterministic --full-set --star-precision 0.03 --calibration-attempts 16 --output output/song-full-set.osz --open
 ```
 
 The command writes `song-full-set.full-set.json` plus one
 `song-full-set.<tier>.criteria.json` report per difficulty. Each report includes
 circle, slider, and spinner counts plus heuristic jump, burst, stream, stack, and
-position-diversity measurements. FullSet-v1 runs V4 independently for each tier;
+position-diversity measurements. The set report records every density/spacing
+attempt, its measured no-mod star rating, achieved error, calibration phase, and
+whether every requested precision target was met. FullSet-v1 runs V4 independently for each tier;
 learned event nesting and one-pass shared inference require Conformer-v5. The
 output is a local draft and is not eligible for ranking.
+
+For slower maximum-precision calibration, use:
+
+```bash
+uv run osumapper generate song.mp3 --mode standard --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --flow-engine deterministic --full-set --star-precision 0.01 --calibration-attempts 24 --output output/song-precision.osz
+```
+
+This precision value measures the final no-mod star-rating margin only. Structural
+criteria, pattern diversity, object-type counts, and playfield safety are reported
+separately. It does not measure musical judgement or guarantee that a map feels
+human-authored; listening and test play remain required.
 
 ### PatternPlanner-v1
 
@@ -300,6 +315,8 @@ The most useful `generate` options are:
 | `--difficulty-tier NAME` | Select `easy`, `normal`, `hard`, `insane`, `expert`, or `expert-plus` for V4 output. |
 | `--target-stars NUMBER` | Fix the requested no-mod standard star target inside the selected tier. |
 | `--full-set` | Generate all six fixed standard tiers in one validated `.osz`. |
+| `--star-precision NUMBER` | Require each full-set tier to land within this many stars; default `0.03`, range `0.001`–`0.25`. |
+| `--calibration-attempts INTEGER` | Bound coarse and fine precision attempts per tier; default `16`, range `1`–`30`. |
 | `--seed INTEGER` | Set the deterministic seed; the default is `2026`. |
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
 | `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |

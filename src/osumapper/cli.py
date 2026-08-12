@@ -31,7 +31,12 @@ from osumapper.models import (
     verify_model,
 )
 from osumapper.paths import project_root
-from osumapper.pipeline import GenerationRequest, generate_package
+from osumapper.pipeline import (
+    FULL_SET_DEFAULT_MAX_ATTEMPTS,
+    FULL_SET_DEFAULT_STAR_PRECISION,
+    GenerationRequest,
+    generate_package,
+)
 from osumapper.presets import preset_names
 from osumapper.stable import scan_stable_maps, write_maplist
 from osumapper.training.analysis import analyze_map
@@ -135,6 +140,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--full-set",
         action="store_true",
         help="generate Easy through Expert+ as one six-difficulty osu!standard package",
+    )
+    generate.add_argument(
+        "--star-precision",
+        type=float,
+        default=FULL_SET_DEFAULT_STAR_PRECISION,
+        metavar="STARS",
+        help=(
+            "maximum measured star error per full-set difficulty "
+            f"(default: {FULL_SET_DEFAULT_STAR_PRECISION:.2f})"
+        ),
+    )
+    generate.add_argument(
+        "--calibration-attempts",
+        type=int,
+        default=FULL_SET_DEFAULT_MAX_ATTEMPTS,
+        metavar="COUNT",
+        help=(
+            "maximum coarse and fine calibration attempts per difficulty "
+            f"(default: {FULL_SET_DEFAULT_MAX_ATTEMPTS})"
+        ),
     )
     generate.add_argument("--bpm", type=float, help="tempo for audio-only input")
     generate.add_argument("--offset", type=int, help="timing offset in milliseconds")
@@ -409,6 +434,8 @@ def _generate(args: argparse.Namespace) -> int:
             difficulty_tier=args.difficulty_tier,
             target_stars=args.target_stars,
             full_set=args.full_set,
+            star_precision=args.star_precision,
+            calibration_attempts=args.calibration_attempts,
             audio=args.audio,
             bpm=args.bpm,
             offset_ms=args.offset,

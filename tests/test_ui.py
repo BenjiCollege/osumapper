@@ -91,6 +91,10 @@ class UiHelperTests(unittest.TestCase):
         )
 
         self.assertIn("--full-set", command)
+        self.assertIn("--star-precision", command)
+        self.assertEqual(command[command.index("--star-precision") + 1], "0.03")
+        self.assertIn("--calibration-attempts", command)
+        self.assertEqual(command[command.index("--calibration-attempts") + 1], "16")
         self.assertNotIn("--difficulty-tier", command)
         self.assertNotIn("--target-stars", command)
         self.assertNotIn("--target-density", command)

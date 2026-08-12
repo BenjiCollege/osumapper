@@ -64,6 +64,8 @@ class GenerationOptions:
     difficulty_tier: str = "hard"
     target_stars: float = 3.35
     full_set: bool = False
+    star_precision: float = 0.03
+    calibration_attempts: int = 16
     bpm: float | None = None
     offset_ms: int | None = None
     key_count: int = 4
@@ -189,7 +191,15 @@ def build_generate_command(source: Path, output: Path, options: GenerationOption
     if options.difficulty:
         command.extend(("--difficulty", options.difficulty))
     if options.full_set:
-        command.append("--full-set")
+        command.extend(
+            (
+                "--full-set",
+                "--star-precision",
+                str(options.star_precision),
+                "--calibration-attempts",
+                str(options.calibration_attempts),
+            )
+        )
     else:
         command.extend(("--difficulty-tier", options.difficulty_tier))
         command.extend(("--target-stars", str(options.target_stars)))
@@ -324,6 +334,8 @@ class OsumapperStudio:
         self.target_stars = tk.StringVar(value="3.35")
         self.difficulty_tier.trace_add("write", self._sync_target_stars)
         self.full_set = tk.BooleanVar(value=False)
+        self.star_precision = tk.StringVar(value="0.03")
+        self.calibration_attempts = tk.StringVar(value="16")
         self.bpm = tk.StringVar()
         self.offset = tk.StringVar()
         self.keys = tk.StringVar(value="4")
@@ -472,6 +484,18 @@ class OsumapperStudio:
             text="Generate complete Easy–Expert+ set",
             variable=self.full_set,
         ).pack(anchor="w", pady=(4, 6))
+        self._entry_row(settings, "Maximum star error", self.star_precision)
+        self._entry_row(settings, "Calibration attempts", self.calibration_attempts)
+        ttk.Label(
+            settings,
+            text=(
+                "Precision automation first calibrates density, then locks the rhythm "
+                "and fine-tunes PatternPlanner spacing against measured rosu-pp stars."
+            ),
+            style="Muted.TLabel",
+            wraplength=390,
+            justify="left",
+        ).pack(fill="x", pady=(0, 5))
         self._combo_row(
             settings,
             "Output difficulty",
@@ -860,12 +884,20 @@ class OsumapperStudio:
             seed = int(self.seed.get())
             keys = int(self.keys.get())
             offset = int(self.offset.get()) if self.offset.get().strip() else None
+            calibration_attempts = int(self.calibration_attempts.get())
         except ValueError as exc:
-            raise ValueError("Seed and offset must be whole numbers.") from exc
+            raise ValueError(
+                "Seed, offset, and calibration attempts must be whole numbers."
+            ) from exc
         if not 1 <= keys <= 18:
             raise ValueError("Mania keys must be between 1 and 18.")
         threshold = self._optional_float(self.threshold.get(), "Threshold")
         density = self._optional_float(self.density.get(), "Density")
+        star_precision = self._optional_float(self.star_precision.get(), "Maximum star error")
+        if star_precision is None or not 0.001 <= star_precision <= 0.25:
+            raise ValueError("Maximum star error must be between 0.001 and 0.25 stars.")
+        if not 1 <= calibration_attempts <= 30:
+            raise ValueError("Calibration attempts must be between 1 and 30.")
         if self.full_set.get():
             if self.rhythm_engine.get() != "modern":
                 raise ValueError("FullSet-v1 requires the modern rhythm engine.")
@@ -913,6 +945,8 @@ class OsumapperStudio:
             difficulty_tier=resolved_difficulty[0].key,
             target_stars=resolved_difficulty[1],
             full_set=self.full_set.get(),
+            star_precision=star_precision,
+            calibration_attempts=calibration_attempts,
             bpm=self._optional_float(self.bpm.get(), "BPM"),
             offset_ms=offset,
             key_count=keys,

@@ -18,9 +18,11 @@ from osumapper.difficulty import (
 from osumapper.engine import _deterministic_flow
 from osumapper.errors import InputError
 from osumapper.pipeline import (
+    CalibrationAttempt,
     GenerationRequest,
     _next_density,
     _next_full_set_controls,
+    _next_precision_flow,
     generate_package,
 )
 
@@ -49,6 +51,16 @@ class FullSetTests(unittest.TestCase):
         self.assertLess(density, 0.5)
         self.assertLess(flow_scale, 0.8)
         self.assertGreaterEqual(flow_scale, 0.5)
+
+    def test_precision_flow_interpolates_between_measured_star_bracket(self) -> None:
+        history = [
+            CalibrationAttempt(1, "fine-spacing", 1.2, 0.9, 3.20, 0.15),
+            CalibrationAttempt(2, "fine-spacing", 1.2, 1.1, 3.50, 0.15),
+        ]
+
+        flow = _next_precision_flow(history, density=1.2, target_stars=3.35)
+
+        self.assertAlmostEqual(flow, 1.0, places=6)
 
     def test_deterministic_flow_scale_increases_mean_jump_distance(self) -> None:
         count = 24
@@ -158,6 +170,8 @@ class FullSetTests(unittest.TestCase):
             self.assertTrue(set_report["identical_timing_sections"])
             self.assertEqual(set_report["generated_difficulties"], 6)
             self.assertEqual(set_report["mean_star_error"], 0.0)
+            self.assertTrue(set_report["all_precision_targets_met"])
+            self.assertEqual(set_report["requested_star_precision"], 0.03)
             for profile in STANDARD_DIFFICULTIES:
                 self.assertTrue((root / f"full-set.{profile.key}.criteria.json").is_file())
 
