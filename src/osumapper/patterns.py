@@ -187,7 +187,10 @@ def plan_standard_patterns(
     stars = profile.default_stars if target_stars is None else float(target_stars)
     complexity = min(1.0, max(0.0, (stars - 1.5) / 5.5))
     tier_index = _TIER_INDEX[profile.key]
-    scale = min(2.0, max(0.45, float(flow_scale)))
+    # Calibrated Expert tiers may need wider stream and jump spacing than lower
+    # difficulties. The pipeline applies tier-specific bounds up to 3.75; this
+    # final defensive cap prevents unbounded or off-screen geometry.
+    scale = min(3.75, max(0.45, float(flow_scale)))
     rng = random.Random(seed + tier_index * 10_007)
     timing = document.timing_points()
     uninherited = timing["uts"]

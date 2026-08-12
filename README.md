@@ -295,8 +295,15 @@ Use **Clear queue** when you are ready for another song. The queue shows each
 item's state and output, can be stopped, and can retry failed or stopped items.
 Generation controls expose the preset, ruleset, seed, flow/rhythm engines, modern
 model, validation-calibrated threshold override, density, difficulty, BPM,
-offset, and mania keys. **Import each completed package into osu!lazer** opens
-every successful `.osz` as it finishes.
+offset, and mania keys. Studio now defaults to the tested
+`rhythm-conformer-v5-curated-run1-seed-2026` rhythm model, deterministic
+PatternPlanner, complete six-difficulty generation, the installed-lazer star
+calculator, seed 2026, and ±0.03★ precision. Learned placement remains optional:
+selecting it requires a real `placement-v1/model.keras` plus `config.json`.
+
+**Import completed packages into osu!lazer** is deliberately disabled by default.
+Importing a local package must not be treated as a filename- or title-based
+replacement for an older local mapset.
 
 Enable **Generate complete Easy–Expert+ set** to create one validated six-map
 package for every queued song. Full-set mode manages tier density and star targets
@@ -371,6 +378,27 @@ Run `uv run osumapper generate --help` for the authoritative command reference.
 4. Import it with `--open`, double-click it, or drag it into osu!lazer.
 5. Open the generated difficulty in the editor and review timing, object placement,
    hitsounds, metadata, and playability before publishing.
+
+### Safely replacing older local V4 drafts
+
+Do not edit lazer's `files/` hash store or `client.realm`. The supported workflow is
+through exported/imported packages and lazer's own deletion controls:
+
+1. Generate the complete V5 batch with automatic import disabled.
+2. Keep every `.osz` and its sibling criteria report until review is complete.
+3. In lazer song select, search for `creator=osumapper` to locate local generated
+   sets. Export any V4 draft you want to preserve.
+4. Use lazer's in-game beatmap options to delete only the old V4 set. When using a
+   filtered bulk deletion, review every visible result first.
+5. Import the validated V5 `.osz` files by dragging them into lazer or enabling
+   Studio's import option for a reviewed retry.
+
+Audio-only osumapper packages do not carry an online `BeatmapSetID` or `BeatmapID`.
+Because the generated `.osu` files and hashes change, regenerating the same song is
+not a reliable automatic update signal; importing before deleting the old local set
+may leave both versions visible. See the official
+[lazer file-storage documentation](https://osu.ppy.sh/wiki/en/Client/Release_stream/Lazer/File_storage)
+and [beatmap search filters](https://osu.ppy.sh/wiki/en/Beatmap_search).
 
 Generated maps are starting points for private/local review. The current general
 osu! ranking criteria require ranking-bound hit objects, hitsounds, and timing to

@@ -31,6 +31,15 @@ Progress = Callable[[str], None]
 FULL_SET_DEFAULT_MAX_ATTEMPTS = 24
 FULL_SET_DEFAULT_STAR_PRECISION = 0.03
 FULL_SET_MAX_MEAN_STAR_ERROR = 0.15
+_MIN_FLOW_SCALE = 0.45
+_MAX_FLOW_SCALE = {
+    "easy": 2.0,
+    "normal": 2.0,
+    "hard": 2.4,
+    "insane": 2.7,
+    "expert": 3.25,
+    "expert-plus": 3.75,
+}
 _GAMEPLAY_BLOCKING_CRITERIA = {
     "objects_on_same_tick",
     "circle_gap_below_10ms",
@@ -137,15 +146,17 @@ def _next_full_set_controls(
 ) -> tuple[float, float]:
     target = profile.default_stars if target_stars is None else target_stars
     ratio = target / max(0.1, actual_stars)
+    maximum_flow = _MAX_FLOW_SCALE[profile.key]
     if profile.key in {"easy", "normal"}:
         next_density = density * max(0.7, min(1.3, ratio**0.6))
         next_flow = flow_scale * max(0.75, min(1.25, ratio**0.5))
-        return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
+        return max(0.1, min(20.0, next_density)), max(0.5, min(maximum_flow, next_flow))
     if profile.key not in {"expert", "expert-plus"}:
         return _next_density(density, target, actual_stars), flow_scale
-    next_density = density * max(0.9, min(1.1, ratio**0.25))
+    maximum_density_step = 1.3 if profile.key == "expert-plus" else 1.22
+    next_density = density * max(0.9, min(maximum_density_step, ratio**0.45))
     next_flow = flow_scale * max(0.75, min(1.35, ratio**1.2))
-    return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
+    return max(0.1, min(20.0, next_density)), max(0.5, min(maximum_flow, next_flow))
 
 
 def _next_precision_flow(
@@ -153,6 +164,7 @@ def _next_precision_flow(
     *,
     density: float,
     target_stars: float,
+    maximum_flow: float = 2.0,
 ) -> float:
     """Choose the next spacing scale using local measured star results.
 
@@ -200,15 +212,28 @@ def _next_precision_flow(
         latest = same_rhythm[-1]
         ratio = target_stars / max(0.1, latest.actual_stars)
         candidate = latest.flow_scale * max(0.82, min(1.22, ratio**1.5))
+        # Near the target, a purely ratio-based step becomes so small that a
+        # non-monotonic playfield layout can consume the whole attempt budget
+        # before producing the first measurement on the other side. Explore by
+        # a deterministic minimum until a bracket exists; interpolation takes
+        # over immediately after crossing the target.
+        minimum_step = min(0.08, maximum_flow * 0.025)
+        if not above and latest.actual_stars < target_stars:
+            candidate = max(candidate, latest.flow_scale + minimum_step)
+        elif not below and latest.actual_stars > target_stars:
+            candidate = min(candidate, latest.flow_scale - minimum_step)
 
-    candidate = max(0.45, min(2.0, candidate))
+    candidate = max(_MIN_FLOW_SCALE, min(maximum_flow, candidate))
     # Prevent rounding back onto an already measured point. Step toward the target
     # in small increments while staying inside the PatternPlanner scale bounds.
     measured = {round(item.flow_scale, 6) for item in same_rhythm}
     if round(candidate, 6) in measured:
         direction = 1.0 if same_rhythm[-1].actual_stars < target_stars else -1.0
         for step in (0.01, 0.02, 0.04, 0.08):
-            alternative = max(0.45, min(2.0, candidate + direction * step))
+            alternative = max(
+                _MIN_FLOW_SCALE,
+                min(maximum_flow, candidate + direction * step),
+            )
             if round(alternative, 6) not in measured:
                 candidate = alternative
                 break
@@ -250,6 +275,83 @@ def _rhythm_selection_plateaued(history: list[CalibrationAttempt]) -> bool:
     )
 
 
+def _threshold_selection_saturated(history: list[CalibrationAttempt]) -> bool:
+    """Detect changing cutoffs that no longer change the selected timestamps."""
+
+    if len(history) < 3:
+        return False
+    recent = history[-3:]
+    if not all(item.phase == "coarse-threshold" for item in recent):
+        return False
+    counts = [item.object_count for item in recent]
+    thresholds = [item.rhythm_threshold for item in recent]
+    if any(value is None for value in (*counts, *thresholds)):
+        return False
+    numeric_counts = [int(value) for value in counts if value is not None]
+    numeric_thresholds = [float(value) for value in thresholds if value is not None]
+    tolerance = max(2, round(sum(numeric_counts) / len(numeric_counts) * 0.005))
+    return (
+        max(numeric_counts) - min(numeric_counts) <= tolerance
+        and max(numeric_thresholds) - min(numeric_thresholds) > 1e-5
+    )
+
+
+def _threshold_strain_plateaued(
+    history: list[CalibrationAttempt],
+    target_stars: float,
+) -> bool:
+    """Stop adding objects when they no longer create meaningful strain.
+
+    A low probability cutoff can add hundreds of isolated, low-value timestamps
+    while barely moving lazer's difficulty value. Three such measurements are
+    enough to preserve the selected rhythm and spend the remaining calibration
+    budget on PatternPlanner strain instead.
+    """
+
+    if len(history) < 3:
+        return False
+    recent = history[-3:]
+    if not all(
+        item.phase == "coarse-threshold" and item.actual_stars < target_stars for item in recent
+    ):
+        return False
+    counts = [item.object_count for item in recent]
+    if any(value is None for value in counts):
+        return False
+    numeric_counts = [int(value) for value in counts if value is not None]
+    stars = [item.actual_stars for item in recent]
+    meaningful_object_growth = numeric_counts[-1] - numeric_counts[0] >= max(
+        10,
+        round(numeric_counts[0] * 0.02),
+    )
+    return meaningful_object_growth and max(stars) - min(stars) <= 0.15
+
+
+def _density_strain_plateaued(
+    history: list[CalibrationAttempt],
+    target_stars: float,
+    maximum_flow: float,
+) -> bool:
+    """Detect a max-spacing density search that adds objects but not strain."""
+
+    if len(history) < 3:
+        return False
+    recent = history[-3:]
+    if not all(
+        item.phase == "coarse-density"
+        and item.actual_stars < target_stars
+        and abs(item.flow_scale - maximum_flow) < 1e-6
+        for item in recent
+    ):
+        return False
+    counts = [item.object_count for item in recent]
+    if any(value is None for value in counts):
+        return False
+    numeric_counts = [int(value) for value in counts if value is not None]
+    stars = [item.actual_stars for item in recent]
+    return numeric_counts[-1] - numeric_counts[0] >= 5 and max(stars) - min(stars) <= 0.15
+
+
 def _calibrated_tier_threshold(
     model_root: Path | None,
     profile: StandardDifficulty,
@@ -274,7 +376,7 @@ def _next_plateau_threshold(current: float, target_stars: float, actual_stars: f
     """Move the probability cutoff toward a denser or sparser rhythm."""
 
     if actual_stars < target_stars:
-        factor = max(0.65, min(0.92, actual_stars / max(target_stars, 0.1)))
+        factor = max(0.52, min(0.92, actual_stars / max(target_stars, 0.1)))
         return max(0.05, current * factor)
     factor = max(0.65, min(0.92, target_stars / max(actual_stars, 0.1)))
     return min(0.99, current + (1.0 - current) * (1.0 - factor))
@@ -363,6 +465,10 @@ def _generate_full_set_difficulty(
             bool(line.strip()) and not line.lstrip().startswith("//")
             for line in generated.sections().get("HitObjects", [])
         )
+        progress(
+            f"{star_calculator.name} measured {profile.label}: {actual_stars:.3f}★ "
+            f"({object_count} objects, error {actual_stars - target:+.3f}★)"
+        )
         history.append(
             CalibrationAttempt(
                 attempt=attempt,
@@ -399,7 +505,14 @@ def _generate_full_set_difficulty(
                 calibration_history=tuple(history),
                 legacy_stars=legacy_stars,
             )
-        plateaued = fine_density is None and _rhythm_selection_plateaued(history)
+        plateaued = fine_density is None and (
+            _rhythm_selection_plateaued(history)
+            or _density_strain_plateaued(
+                history,
+                target,
+                _MAX_FLOW_SCALE[profile.key],
+            )
+        )
         if plateaued and error > STAR_TARGET_TOLERANCE:
             current_threshold = (
                 rhythm_threshold
@@ -423,6 +536,24 @@ def _generate_full_set_difficulty(
                     f"{next_threshold:.4f} before spatial fine-tuning"
                 )
                 continue
+        threshold_saturated = (
+            _threshold_selection_saturated(history)
+            or _threshold_strain_plateaued(history, target)
+            or (threshold_adjusted and rhythm_threshold is not None and rhythm_threshold <= 0.05001)
+        )
+        if threshold_saturated and fine_density is None and error > star_precision:
+            fine_density = density
+            progress(
+                f"{profile.label} rhythm selection saturated at {object_count} objects; "
+                "locking timestamps and switching to high-tier strain calibration"
+            )
+            flow_scale = _next_precision_flow(
+                history,
+                density=density,
+                target_stars=target,
+                maximum_flow=_MAX_FLOW_SCALE[profile.key],
+            )
+            continue
         if threshold_adjusted and fine_density is None and error > STAR_TARGET_TOLERANCE:
             assert rhythm_threshold is not None
             next_threshold, sparse_threshold, dense_threshold = _next_bracketed_threshold(
@@ -458,6 +589,7 @@ def _generate_full_set_difficulty(
                 history,
                 density=density,
                 target_stars=target,
+                maximum_flow=_MAX_FLOW_SCALE[profile.key],
             )
             if abs(next_flow_scale - flow_scale) < 1e-6 and error > star_precision:
                 current_threshold = (

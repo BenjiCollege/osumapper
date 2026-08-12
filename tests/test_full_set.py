@@ -20,12 +20,15 @@ from osumapper.errors import InputError
 from osumapper.pipeline import (
     CalibrationAttempt,
     GenerationRequest,
+    _density_strain_plateaued,
     _next_bracketed_threshold,
     _next_density,
     _next_full_set_controls,
     _next_plateau_threshold,
     _next_precision_flow,
     _rhythm_selection_plateaued,
+    _threshold_selection_saturated,
+    _threshold_strain_plateaued,
     generate_package,
 )
 
@@ -106,6 +109,90 @@ class FullSetTests(unittest.TestCase):
         ]
 
         self.assertTrue(_rhythm_selection_plateaued(history))
+
+    def test_threshold_saturation_detects_unchanged_timestamp_selection(self) -> None:
+        history = [
+            CalibrationAttempt(15, "coarse-threshold", 12.0, 1.0, 5.70, 1.30, 1014, 0.20),
+            CalibrationAttempt(16, "coarse-threshold", 12.0, 1.0, 5.72, 1.28, 1015, 0.10),
+            CalibrationAttempt(17, "coarse-threshold", 12.0, 1.0, 5.73, 1.27, 1014, 0.05),
+        ]
+
+        self.assertTrue(_threshold_selection_saturated(history))
+
+    def test_threshold_saturation_does_not_trigger_while_objects_are_added(self) -> None:
+        history = [
+            CalibrationAttempt(15, "coarse-threshold", 12.0, 1.0, 5.10, 1.90, 522, 0.80),
+            CalibrationAttempt(16, "coarse-threshold", 12.0, 1.0, 5.40, 1.60, 760, 0.40),
+            CalibrationAttempt(17, "coarse-threshold", 12.0, 1.0, 5.70, 1.30, 1014, 0.20),
+        ]
+
+        self.assertFalse(_threshold_selection_saturated(history))
+
+    def test_threshold_strain_plateau_preserves_budget_when_extra_objects_add_no_stars(
+        self,
+    ) -> None:
+        history = [
+            CalibrationAttempt(11, "coarse-threshold", 5.08, 1.0, 4.931, 0.969, 961, 0.65),
+            CalibrationAttempt(12, "coarse-threshold", 5.08, 1.0, 4.947, 0.953, 1155, 0.55),
+            CalibrationAttempt(13, "coarse-threshold", 5.08, 1.0, 5.023, 0.877, 1286, 0.46),
+        ]
+
+        self.assertTrue(_threshold_strain_plateaued(history, 5.90))
+
+    def test_threshold_strain_plateau_keeps_searching_when_stars_improve(self) -> None:
+        history = [
+            CalibrationAttempt(11, "coarse-threshold", 5.08, 1.0, 4.50, 1.40, 961, 0.65),
+            CalibrationAttempt(12, "coarse-threshold", 5.08, 1.0, 4.80, 1.10, 1155, 0.55),
+            CalibrationAttempt(13, "coarse-threshold", 5.08, 1.0, 5.10, 0.80, 1286, 0.46),
+        ]
+
+        self.assertFalse(_threshold_strain_plateaued(history, 5.90))
+
+    def test_threshold_strain_plateau_preserves_final_bracket_attempt(self) -> None:
+        history = [
+            CalibrationAttempt(15, "coarse-threshold", 20.0, 1.0, 5.299, 1.701, 765, 0.30),
+            CalibrationAttempt(16, "coarse-threshold", 20.0, 1.0, 5.385, 1.615, 819, 0.22),
+            CalibrationAttempt(17, "coarse-threshold", 20.0, 1.0, 5.424, 1.576, 856, 0.16),
+        ]
+
+        self.assertTrue(_threshold_strain_plateaued(history, 7.00))
+
+    def test_max_spacing_density_plateau_preserves_threshold_budget(self) -> None:
+        history = [
+            CalibrationAttempt(8, "coarse-density", 9.0, 3.75, 5.049, 1.951, 259),
+            CalibrationAttempt(9, "coarse-density", 12.0, 3.75, 5.046, 1.954, 268),
+            CalibrationAttempt(10, "coarse-density", 15.0, 3.75, 5.169, 1.831, 270),
+        ]
+
+        self.assertTrue(_density_strain_plateaued(history, 7.00, 3.75))
+
+    def test_expert_precision_flow_can_exceed_legacy_two_x_limit(self) -> None:
+        history = [
+            CalibrationAttempt(1, "fine-spacing", 12.0, 2.0, 5.10, 0.80, 1000, 0.05),
+        ]
+
+        flow = _next_precision_flow(
+            history,
+            density=12.0,
+            target_stars=5.90,
+            maximum_flow=3.25,
+        )
+
+        self.assertGreater(flow, 2.0)
+
+    def test_precision_flow_uses_minimum_step_until_target_is_bracketed(self) -> None:
+        history = [
+            CalibrationAttempt(20, "fine-spacing", 20.0, 2.1, 6.95, 0.05, 856, 0.16),
+        ]
+
+        flow = _next_precision_flow(
+            history,
+            density=20.0,
+            target_stars=7.00,
+            maximum_flow=3.75,
+        )
+
+        self.assertGreaterEqual(flow, 2.18)
 
     def test_plateau_threshold_adds_candidates_when_stars_are_too_low(self) -> None:
         self.assertLess(_next_plateau_threshold(0.84, 4.65, 3.56), 0.84)

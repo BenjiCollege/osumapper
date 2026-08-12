@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,13 +9,47 @@ from unittest.mock import patch
 from osumapper.ui import (
     GenerationOptions,
     build_generate_command,
+    default_generation_models,
     discover_inputs,
+    model_bundle_paths,
     normalize_input_path,
+    summarize_process_error,
     unique_output_path,
 )
 
 
 class UiHelperTests(unittest.TestCase):
+    def test_v5_and_placement_paths_are_the_generation_defaults(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            rhythm, placement = default_generation_models(Path("/home/test/osumapper"))
+
+        self.assertEqual(
+            rhythm,
+            Path("/home/test/osumapper/models/modern/rhythm-conformer-v5-curated-run1-seed-2026"),
+        )
+        self.assertEqual(
+            placement,
+            Path("/home/test/osumapper/models/modern/placement-v1"),
+        )
+
+    def test_model_bundle_accepts_folder_or_keras_file(self) -> None:
+        folder_model, folder_config = model_bundle_paths(Path("/models/v5"))
+        file_model, file_config = model_bundle_paths(Path("/models/v5/model.keras"))
+
+        self.assertEqual(folder_model, Path("/models/v5/model.keras"))
+        self.assertEqual(folder_config, Path("/models/v5/config.json"))
+        self.assertEqual(file_model, Path("/models/v5/model.keras"))
+        self.assertEqual(file_config, Path("/models/v5/config.json"))
+
+    def test_star_calibration_failure_is_summarized_for_queue_row(self) -> None:
+        summary = summarize_process_error(
+            "error: Star calibration could not reach Expert+ 7.00★ within the requested "
+            "±0.030★ after 24 attempts. Best result was 5.73★ at density 12.083 and "
+            "spacing 1.000×."
+        )
+
+        self.assertEqual(summary, "Expert+: best 5.73★ / target 7.00★")
+
     @patch("osumapper.ui._running_under_wsl", return_value=True)
     def test_windows_download_path_is_translated_for_wsl(self, _wsl) -> None:
         translated = normalize_input_path(r'"C:\Users\bcten\Downloads\CRAZY_spotdown.org.mp3"')

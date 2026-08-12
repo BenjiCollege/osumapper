@@ -47,6 +47,8 @@ ACCENT = "#5b8cff"
 ACCENT_ACTIVE = "#79a2ff"
 SUCCESS = "#42c89a"
 ERROR = "#ff6b7a"
+DEFAULT_RHYTHM_MODEL = "rhythm-conformer-v5-curated-run1-seed-2026"
+DEFAULT_PLACEMENT_MODEL = "placement-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +80,53 @@ class QueueEntry:
     source: Path
     status: str = "Ready"
     output: Path | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ProcessResult:
+    exit_code: int
+    error: str | None = None
 
 
 _WINDOWS_DRIVE_PATH = re.compile(r"^(?P<drive>[A-Za-z]):[\\/](?P<tail>.*)$")
+_STAR_CALIBRATION_ERROR = re.compile(
+    r"could not reach (?P<tier>.+?) (?P<target>\d+(?:\.\d+)?)★.*?"
+    r"Best result was (?P<best>\d+(?:\.\d+)?)★",
+    re.IGNORECASE,
+)
+
+
+def summarize_process_error(message: str | None) -> str:
+    """Turn a verbose CLI error into an actionable queue-row summary."""
+
+    if not message:
+        return "Generation failed; open Activity for details"
+    normalized = " ".join(message.removeprefix("error:").strip().split())
+    calibration = _STAR_CALIBRATION_ERROR.search(normalized)
+    if calibration:
+        return (
+            f"{calibration.group('tier')}: best {calibration.group('best')}★ / "
+            f"target {calibration.group('target')}★"
+        )
+    return normalized if len(normalized) <= 110 else f"{normalized[:107]}…"
+
+
+def default_generation_models(root: Path) -> tuple[Path, Path]:
+    modern_root = root / "models" / "modern"
+    rhythm = Path(
+        os.environ.get("OSUMAPPER_RHYTHM_MODEL", modern_root / DEFAULT_RHYTHM_MODEL)
+    ).expanduser()
+    placement = Path(
+        os.environ.get("OSUMAPPER_PLACEMENT_MODEL", modern_root / DEFAULT_PLACEMENT_MODEL)
+    ).expanduser()
+    return rhythm, placement
+
+
+def model_bundle_paths(model: Path) -> tuple[Path, Path]:
+    if model.suffix.casefold() == ".keras":
+        return model, model.parent / "config.json"
+    return model / "model.keras", model / "config.json"
 
 
 def _running_under_wsl() -> bool:
@@ -320,30 +366,32 @@ class OsumapperStudio:
         root = project_root()
         paths = DatasetPaths.at()
         dataset_config = read_json(paths.config, default={})
+        default_rhythm_model, default_placement_model = default_generation_models(root)
         self.output_dir = tk.StringVar(value=str(root / "output"))
         self.preset = tk.StringVar(value="default")
         self.mode = tk.StringVar(value="standard")
         self.seed = tk.StringVar(value="2026")
         self.flow_engine = tk.StringVar(value="deterministic")
         self.rhythm_engine = tk.StringVar(value="modern")
-        self.modern_model = tk.StringVar(
-            value=str(root / "models" / "modern" / "rhythm-conformer-v4-standard-stars")
-        )
-        self.placement_model = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
+        self.modern_model = tk.StringVar(value=str(default_rhythm_model))
+        self.placement_model = tk.StringVar(value=str(default_placement_model))
         self.threshold = tk.StringVar()
         self.density = tk.StringVar()
         self.difficulty = tk.StringVar()
         self.difficulty_tier = tk.StringVar(value="hard")
         self.target_stars = tk.StringVar(value="3.35")
         self.difficulty_tier.trace_add("write", self._sync_target_stars)
-        self.full_set = tk.BooleanVar(value=False)
+        self.full_set = tk.BooleanVar(value=True)
         self.star_precision = tk.StringVar(value="0.03")
         self.calibration_attempts = tk.StringVar(value="24")
-        self.star_calculator = tk.StringVar(value="auto")
+        self.star_calculator = tk.StringVar(value="lazer")
         self.bpm = tk.StringVar()
         self.offset = tk.StringVar()
         self.keys = tk.StringVar(value="4")
-        self.open_lazer = tk.BooleanVar(value=True)
+        # Import is deliberately opt-in: lazer does not replace local sets by
+        # matching an audio filename or title, so unattended batches could
+        # otherwise coexist with older V4 drafts.
+        self.open_lazer = tk.BooleanVar(value=False)
         self.all_difficulties = tk.BooleanVar(value=False)
         self.status = tk.StringVar(value="Ready")
 
@@ -352,10 +400,8 @@ class OsumapperStudio:
         self.include_unrated = tk.BooleanVar(value=False)
         self.trust_imported_osz = tk.BooleanVar(value=False)
         self.train_architecture = tk.StringVar(value="conformer-v5")
-        self.train_output = tk.StringVar(
-            value=str(root / "models" / "modern" / "rhythm-conformer-v5-full-set")
-        )
-        self.placement_output = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
+        self.train_output = tk.StringVar(value=str(default_rhythm_model))
+        self.placement_output = tk.StringVar(value=str(default_placement_model))
         self.epochs = tk.StringVar(value="50")
         self.batch_size = tk.StringVar(value="32")
         self.learning_rate = tk.StringVar(value="0.0005")
@@ -458,9 +504,20 @@ class OsumapperStudio:
         self._path_row(settings, "Output folder", self.output_dir, self._choose_output_folder)
         ttk.Checkbutton(
             settings,
-            text="Import each completed package into osu!lazer",
+            text="Import completed packages into osu!lazer (adds; does not replace by title)",
             variable=self.open_lazer,
         ).pack(anchor="w", pady=(5, 10))
+        ttk.Label(
+            settings,
+            text=(
+                "Safe V4 replacement: generate the batch with import disabled, remove the old "
+                "local set inside lazer, then import the validated V5 .osz. osumapper never "
+                "edits lazer's hash store or client database."
+            ),
+            style="CardText.TLabel",
+            wraplength=360,
+            justify="left",
+        ).pack(anchor="w", pady=(0, 10))
         self._section(settings, "Generation controls")
         self._combo_row(settings, "Preset", self.preset, preset_names())
         self._combo_row(settings, "Mode", self.mode, ("standard",))
@@ -524,7 +581,7 @@ class OsumapperStudio:
             wraplength=390,
         ).pack(anchor="w", pady=(2, 7))
         self._entry_row(settings, "Modern model", self.modern_model)
-        self._entry_row(settings, "Placement model", self.placement_model)
+        self._entry_row(settings, "Placement model (optional)", self.placement_model)
         ttk.Label(
             settings,
             text=(
@@ -950,8 +1007,26 @@ class OsumapperStudio:
             if self.placement_model.get().strip()
             else None
         )
+        if self.rhythm_engine.get() == "modern":
+            if model is None:
+                raise ValueError("Choose the trained V5 rhythm model folder.")
+            model_file, config_file = model_bundle_paths(model)
+            if not model_file.is_file() or not config_file.is_file():
+                raise ValueError(
+                    f"The modern rhythm model is incomplete under {model}. "
+                    "Expected model.keras and config.json."
+                )
         if self.flow_engine.get() == "placement" and self.rhythm_engine.get() != "modern":
             raise ValueError("Placement-v1 requires the modern rhythm engine.")
+        if self.flow_engine.get() == "placement":
+            if placement_model is None:
+                raise ValueError("Choose a trained Placement-v1 model folder.")
+            placement_file, placement_config = model_bundle_paths(placement_model)
+            if not placement_file.is_file() or not placement_config.is_file():
+                raise ValueError(
+                    f"Placement-v1 is not trained under {placement_model}. "
+                    "Keep Flow set to deterministic or train Placement-v1 first."
+                )
         return GenerationOptions(
             preset=self.preset.get(),
             mode=self.mode.get(),
@@ -1014,19 +1089,27 @@ class OsumapperStudio:
         completed = 0
         for identifier, command, output in jobs:
             if self.stop_requested:
-                self.events.put(("item", identifier, "Stopped", output))
+                self.events.put(("item", identifier, "Stopped", output, None))
                 continue
-            self.events.put(("item", identifier, "Running", output))
-            code = self._execute(command, label=f"Generate {Path(command[4]).name}")
-            status = "Completed" if code == 0 else "Stopped" if self.stop_requested else "Failed"
-            self.events.put(("item", identifier, status, output))
+            self.events.put(("item", identifier, "Running", output, None))
+            result = self._execute(command, label=f"Generate {Path(command[4]).name}")
+            status = (
+                "Completed"
+                if result.exit_code == 0
+                else "Stopped"
+                if self.stop_requested
+                else "Failed"
+            )
+            detail = summarize_process_error(result.error) if status == "Failed" else None
+            self.events.put(("item", identifier, status, output, detail))
             completed += 1
             self.events.put(("progress", completed / len(jobs) * 100))
         self.events.put(("done", "Queue stopped" if self.stop_requested else "Queue finished"))
 
-    def _execute(self, command: list[str], *, label: str) -> int:
+    def _execute(self, command: list[str], *, label: str) -> ProcessResult:
         self.events.put(("log", f"\n▶ {label}\n{subprocess.list2cmdline(command)}\n", "muted"))
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        last_error: str | None = None
         try:
             process = subprocess.Popen(
                 command,
@@ -1040,17 +1123,21 @@ class OsumapperStudio:
             self.active_process = process
             assert process.stdout is not None
             for line in process.stdout:
-                self.events.put(("log", line, "error" if "error:" in line.casefold() else None))
+                is_error = "error:" in line.casefold()
+                if is_error:
+                    last_error = line.strip()
+                self.events.put(("log", line, "error" if is_error else None))
             code = process.wait()
         except OSError as exc:
-            self.events.put(("log", f"Could not start process: {exc}\n", "error"))
+            last_error = f"Could not start process: {exc}"
+            self.events.put(("log", f"{last_error}\n", "error"))
             code = 1
         finally:
             self.active_process = None
         self.events.put(
             ("log", f"Process exited with code {code}.\n", "success" if code == 0 else "error")
         )
-        return code
+        return ProcessResult(code, last_error)
 
     def _run_single(self, command: list[str], label: str) -> None:
         if self.busy:
@@ -1059,9 +1146,14 @@ class OsumapperStudio:
         self._set_busy(True, label)
 
         def worker() -> None:
-            code = self._execute(command, label=label)
-            self.events.put(("progress", 100 if code == 0 else 0))
-            self.events.put(("done", f"{label} completed" if code == 0 else f"{label} failed"))
+            result = self._execute(command, label=label)
+            self.events.put(("progress", 100 if result.exit_code == 0 else 0))
+            self.events.put(
+                (
+                    "done",
+                    f"{label} completed" if result.exit_code == 0 else f"{label} failed",
+                )
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1369,13 +1461,18 @@ class OsumapperStudio:
                 if kind == "log":
                     self._append_log(event[1], event[2])
                 elif kind == "item":
-                    _, identifier, status, output = event
+                    _, identifier, status, output, detail = event
                     entry = self.entries.get(identifier)
                     if entry is not None:
                         entry.status = status
                         entry.output = output
+                        entry.detail = detail
                         self.queue_tree.set(identifier, "status", status)
-                        self.queue_tree.set(identifier, "output", Path(output).name)
+                        self.queue_tree.set(
+                            identifier,
+                            "output",
+                            detail or Path(output).name,
+                        )
                 elif kind == "progress":
                     self.progress["value"] = event[1]
                 elif kind == "done":
