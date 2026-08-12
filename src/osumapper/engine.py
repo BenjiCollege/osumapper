@@ -404,6 +404,21 @@ def generate_document(
                 target_density=prediction.target_density,
                 seed=config.seed,
             )
+        elif config.flow_engine in {"auto", "deterministic"}:
+            from osumapper.patterns import plan_standard_patterns
+
+            progress(f"Planning deterministic patterns at {config.flow_scale:.3f}× spacing")
+            pattern_plan = plan_standard_patterns(
+                document,
+                prediction.timestamps_ms,
+                difficulty_tier=config.difficulty_tier,
+                target_stars=config.target_stars,
+                seed=config.seed,
+                flow_scale=config.flow_scale,
+            )
+            objects = list(pattern_plan.objects)
+            summary = ", ".join(f"{name}={count}" for name, count in pattern_plan.counts.items())
+            progress(f"PatternPlanner-v1: {summary}")
         else:
             converted = _modern_converted(document, prediction.timestamps_ms, preset)
             objects = _place_standard_objects(workspace, preset, config, progress, converted)

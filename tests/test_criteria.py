@@ -37,6 +37,10 @@ class RankingCriteriaTests(unittest.TestCase):
         self.assertIn("objects_on_same_tick", codes)
         self.assertIn("objects_partially_offscreen_4_3", codes)
         self.assertFalse(report["automated_structural_pass"])
+        self.assertEqual(
+            report["pattern_summary"]["object_types"],
+            {"circles": 2, "sliders": 0, "spinners": 0},
+        )
 
     def test_structurally_clean_map_still_requires_manual_review(self) -> None:
         with tempfile.TemporaryDirectory() as name:
@@ -70,6 +74,7 @@ class RankingCriteriaTests(unittest.TestCase):
         self.assertFalse(report["generated_by_osumapper"])
         self.assertEqual(report["rankability"], "not-determined-manual-review-required")
         self.assertEqual(report["summary"]["manual_checks"], 8)
+        self.assertEqual(report["pattern_summary"]["unique_position_ratio"], 1.0)
         self.assertEqual(stored["audit"], "osu-standard-ranking-criteria-subset")
 
 

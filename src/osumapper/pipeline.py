@@ -283,6 +283,7 @@ def _write_full_set_reports(
                 "flow_scale": result.flow_scale,
                 "attempts": result.attempts,
                 "criteria_summary": reports[result.profile.key]["summary"],
+                "pattern_summary": reports[result.profile.key].get("pattern_summary"),
                 "map_name": generated_map_name(
                     result.document,
                     "full-set-v1",
@@ -303,6 +304,9 @@ def _write_full_set_reports(
         "shared_audio_analysis": True,
         "identical_timing_sections": len(timing_sections) == 1,
         "difficulty_nesting_enforced": False,
+        "pattern_planner": "pattern-planner-v1"
+        if all("pattern_summary" in report for report in reports.values())
+        else None,
         "mean_star_error": sum(errors) / len(errors),
         "maximum_star_error": max(errors),
         "difficulty_results": difficulty_rows,
@@ -310,8 +314,8 @@ def _write_full_set_reports(
         "next_model_milestones": ["conformer-v5-full-set", "placement-v2"],
         "limitations": [
             "V4 runs each difficulty independently; learned cross-tier nesting requires V5.",
-            "Placement-v2, hitsound planning, and section-aware pattern planning "
-            "are not yet trained.",
+            "PatternPlanner-v1 is deterministic and timing-aware, but learned Placement-v2, "
+            "hitsound planning, and learned section-aware pattern planning are not yet trained.",
         ],
     }
     report_path = output.with_name(f"{output.stem}.full-set.json")

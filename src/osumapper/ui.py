@@ -454,6 +454,16 @@ class OsumapperStudio:
             self.flow_engine,
             ("auto", "placement", "deterministic", "legacy"),
         )
+        ttk.Label(
+            settings,
+            text=(
+                "Modern auto/deterministic uses PatternPlanner-v1 for circles, "
+                "sliders, spinners, jumps, streams, and stacks."
+            ),
+            style="Muted.TLabel",
+            wraplength=390,
+            justify="left",
+        ).pack(fill="x", pady=(0, 5))
         self._combo_row(settings, "Rhythm", self.rhythm_engine, ("legacy", "modern"))
         self._entry_row(settings, "Seed", self.seed)
         self._entry_row(settings, "Source map selector", self.difficulty)

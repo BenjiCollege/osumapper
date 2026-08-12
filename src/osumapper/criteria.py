@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import Counter
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -81,6 +82,53 @@ _MANUAL_CHECKS = (
         "preview consistency, and any required audio edits.",
     ),
 )
+
+
+def _pattern_summary(objects: tuple[ModernHitObject, ...]) -> dict[str, Any]:
+    type_counts = Counter(obj.kind for obj in objects)
+    playable = [obj for obj in objects if obj.kind != "spinner"]
+    transitions = list(zip(playable, playable[1:], strict=False))
+    distances = [
+        math.hypot(float(current.x - previous.x), float(current.y - previous.y))
+        for previous, current in transitions
+    ]
+    stacks = sum(
+        distance < 8.0 and current.time_ms - previous.time_ms <= 1_000.0
+        for (previous, current), distance in zip(transitions, distances, strict=True)
+    )
+    fast_group_lengths: list[int] = []
+    start = 0
+    while start + 1 < len(objects):
+        if objects[start + 1].time_ms - objects[start].time_ms > 150.0:
+            start += 1
+            continue
+        end = start + 1
+        while end + 1 < len(objects) and objects[end + 1].time_ms - objects[end].time_ms <= 150.0:
+            end += 1
+        length = end - start + 1
+        if length >= 3:
+            fast_group_lengths.append(length)
+        start = end + 1
+    unique_positions = len({(obj.x, obj.y) for obj in playable})
+    return {
+        "analyzer": "pattern-summary-v1",
+        "object_types": {
+            "circles": type_counts["circle"],
+            "sliders": type_counts["slider"],
+            "spinners": type_counts["spinner"],
+        },
+        "patterns": {
+            "jumps_over_160px": sum(distance >= 160.0 for distance in distances),
+            "bursts_3_to_4_objects": sum(length in {3, 4} for length in fast_group_lengths),
+            "streams_5_plus_objects": sum(length >= 5 for length in fast_group_lengths),
+            "stacks_below_8px": stacks,
+        },
+        "object_type_ratios": {
+            "slider": type_counts["slider"] / len(objects) if objects else 0.0,
+            "spinner": type_counts["spinner"] / len(objects) if objects else 0.0,
+        },
+        "unique_position_ratio": unique_positions / len(playable) if playable else 0.0,
+    }
 
 
 def _issue(
@@ -463,6 +511,7 @@ def audit_standard_criteria(
             "not-rankable-generated-draft" if generated else "not-determined-manual-review-required"
         ),
         "automated_structural_pass": structural_errors == 0,
+        "pattern_summary": _pattern_summary(objects),
         "summary": {
             "errors": severity_counts["error"],
             "warnings": severity_counts["warning"],

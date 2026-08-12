@@ -105,6 +105,10 @@ def _build_parser() -> argparse.ArgumentParser:
         "--flow-engine",
         choices=("auto", "legacy", "deterministic", "placement"),
         default="auto",
+        help=(
+            "modern auto/deterministic uses PatternPlanner-v1; placement requires a "
+            "trained Placement-v1 model"
+        ),
     )
     generate.add_argument("--rhythm-engine", choices=("legacy", "modern"), default="legacy")
     generate.add_argument(

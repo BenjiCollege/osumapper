@@ -155,9 +155,31 @@ uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/
 ```
 
 The command writes `song-full-set.full-set.json` plus one
-`song-full-set.<tier>.criteria.json` report per difficulty. FullSet-v1 runs V4
-independently for each tier; learned event nesting and one-pass shared inference
-require Conformer-v5. The output is a local draft and is not eligible for ranking.
+`song-full-set.<tier>.criteria.json` report per difficulty. Each report includes
+circle, slider, and spinner counts plus heuristic jump, burst, stream, stack, and
+position-diversity measurements. FullSet-v1 runs V4 independently for each tier;
+learned event nesting and one-pass shared inference require Conformer-v5. The
+output is a local draft and is not eligible for ranking.
+
+### PatternPlanner-v1
+
+Modern generation with `--flow-engine deterministic` or `auto` uses the seeded,
+difficulty-aware PatternPlanner-v1 after Conformer-v4 selects rhythm timestamps.
+It creates a controlled mixture of:
+
+- circles and new-combo boundaries;
+- linear sliders whose duration leaves a legal gap before the next object;
+- spinners only when a musical rest is long enough for that difficulty;
+- wide jumps, curved compact streams and bursts, and sparse readable stacks; and
+- playfield-clamped positions and slider endpoints.
+
+The same seed, input, model, and controls reproduce the same plan. Easy through
+Hard favor readability, near-stacks, and more sliders. Expert and Expert+ permit
+larger movement, tighter streams, and sparse exact stacks. The planner never adds
+rhythm timestamps: timing precision remains the responsibility of Conformer-v4,
+and star calibration plus the criteria audit still gate export. This is a bounded
+heuristic placement system, not the future learned Placement-v2 model; every map
+still requires listening, test play, and human editing.
 
 ## Command examples
 
@@ -285,9 +307,9 @@ The most useful `generate` options are:
 | `--placement-model PATH` | Select a trained Placement-v1 directory or `.keras` file. |
 | `--rhythm-threshold NUMBER` | Override the modern model's hit-probability threshold. |
 | `--target-density NUMBER` | Cap modern output at a target number of objects per second. |
-| `--flow-engine auto` | Use the compatible legacy flow model when available. |
+| `--flow-engine auto` | With modern rhythm, use PatternPlanner-v1; legacy rhythm retains compatible legacy flow. |
 | `--flow-engine legacy` | Require the legacy per-map flow model. |
-| `--flow-engine deterministic` | Use the fast, seeded cross-platform flow implementation. |
+| `--flow-engine deterministic` | Use seeded PatternPlanner-v1 for modern standard maps. |
 | `--flow-engine placement` | Use learned Placement-v1 flow with the modern rhythm engine. |
 | `--bpm NUMBER` | Override timing estimation for audio-only input. |
 | `--offset MS` | Set the first timing-point offset for audio-only input. |
