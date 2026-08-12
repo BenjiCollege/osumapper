@@ -83,6 +83,15 @@ class FullSetTests(unittest.TestCase):
 
         self.assertFalse(_rhythm_selection_plateaued(history))
 
+    def test_density_plateau_allows_small_pattern_strain_variation(self) -> None:
+        history = [
+            CalibrationAttempt(6, "coarse-density", 4.06, 2.0, 6.68, 0.32, 356),
+            CalibrationAttempt(7, "coarse-density", 4.11, 2.0, 6.68, 0.32, 356),
+            CalibrationAttempt(8, "coarse-density", 4.15, 2.0, 6.58, 0.42, 357),
+        ]
+
+        self.assertTrue(_rhythm_selection_plateaued(history))
+
     def test_plateau_threshold_adds_candidates_when_stars_are_too_low(self) -> None:
         self.assertLess(_next_plateau_threshold(0.84, 4.65, 3.56), 0.84)
 
@@ -211,6 +220,60 @@ class FullSetTests(unittest.TestCase):
             self.assertEqual(set_report["requested_star_precision"], 0.03)
             for profile in STANDARD_DIFFICULTIES:
                 self.assertTrue((root / f"full-set.{profile.key}.criteria.json").is_file())
+
+    def test_single_tier_generation_calibrates_before_export(self) -> None:
+        def fake_generate(document, _audio, _workspace, _preset, config, _progress):
+            profile = standard_difficulty(config.difficulty_tier)
+            return apply_standard_difficulty(document, profile).with_hit_objects(
+                [
+                    {"x": 128, "y": 192, "time": 1_000, "type": 1},
+                    {"x": 384, "y": 192, "time": 32_000, "type": 1},
+                ],
+                preset="test",
+                seed=config.seed,
+            )
+
+        audit = {
+            "issues": [],
+            "summary": {
+                "errors": 0,
+                "warnings": 0,
+                "structural_error_occurrences": 0,
+            },
+        }
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "standard.osu"
+            source.write_bytes((FIXTURES / "standard.osu").read_bytes())
+            (root / "audio.wav").write_bytes(b"RIFF-fixture")
+            output = root / "single.osz"
+
+            with (
+                patch("osumapper.pipeline.generate_document", side_effect=fake_generate) as run,
+                patch(
+                    "osumapper.pipeline.calculate_standard_stars",
+                    side_effect=[4.17, 3.90, 3.50, 3.36],
+                ),
+                patch("osumapper.pipeline.audit_standard_criteria", return_value=audit),
+            ):
+                generate_package(
+                    GenerationRequest(
+                        source=source,
+                        output=output,
+                        mode=GameMode.STANDARD,
+                        rhythm_engine="modern",
+                        difficulty_tier="hard",
+                        target_stars=3.35,
+                    ),
+                    progress=lambda _message: None,
+                )
+
+            report = json.loads((root / "single.criteria.json").read_text(encoding="utf-8"))
+            self.assertTrue(output.is_file())
+            self.assertEqual(run.call_count, 4)
+            self.assertEqual(report["star_calibration"]["attempts"], 4)
+            self.assertAlmostEqual(report["star_calibration"]["actual_stars"], 3.36)
+            self.assertTrue(report["star_calibration"]["precision_target_met"])
 
 
 if __name__ == "__main__":

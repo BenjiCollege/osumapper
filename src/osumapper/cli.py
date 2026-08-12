@@ -149,7 +149,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=FULL_SET_DEFAULT_STAR_PRECISION,
         metavar="STARS",
         help=(
-            "maximum measured star error per full-set difficulty "
+            "maximum measured star error per calibrated difficulty "
             f"(default: {FULL_SET_DEFAULT_STAR_PRECISION:.2f})"
         ),
     )

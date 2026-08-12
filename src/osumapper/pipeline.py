@@ -127,14 +127,16 @@ def _next_full_set_controls(
     density: float,
     flow_scale: float,
     actual_stars: float,
+    target_stars: float | None = None,
 ) -> tuple[float, float]:
-    ratio = profile.default_stars / max(0.1, actual_stars)
+    target = profile.default_stars if target_stars is None else target_stars
+    ratio = target / max(0.1, actual_stars)
     if profile.key in {"easy", "normal"}:
         next_density = density * max(0.7, min(1.3, ratio**0.6))
         next_flow = flow_scale * max(0.75, min(1.25, ratio**0.5))
         return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
     if profile.key not in {"expert", "expert-plus"}:
-        return _next_density(density, profile.default_stars, actual_stars), flow_scale
+        return _next_density(density, target, actual_stars), flow_scale
     next_density = density * max(0.9, min(1.1, ratio**0.25))
     next_flow = flow_scale * max(0.75, min(1.35, ratio**1.2))
     return max(0.1, min(20.0, next_density)), max(0.5, min(2.0, next_flow))
@@ -201,8 +203,9 @@ def _rhythm_selection_plateaued(history: list[CalibrationAttempt]) -> bool:
 
     A calibrated model may reach its available high-confidence candidates well
     before the requested star rating. Continuing to multiply density then repeats
-    effectively identical maps. Three stable measurements are enough to hand the
-    remaining correction to spatial strain.
+    effectively identical maps. Object count is the stable signal here: star
+    strain can still fluctuate when PatternPlanner changes object types at a new
+    density.
     """
 
     if len(history) < 3:
@@ -227,8 +230,6 @@ def _rhythm_selection_plateaued(history: list[CalibrationAttempt]) -> bool:
             )
         )
         and max(numeric_counts) - min(numeric_counts) <= count_tolerance
-        and max(item.actual_stars for item in recent) - min(item.actual_stars for item in recent)
-        <= 0.05
     )
 
 
@@ -272,8 +273,11 @@ def _generate_full_set_difficulty(
     star_precision: float,
     max_attempts: int,
     progress: Progress,
+    *,
+    target_stars: float | None = None,
 ) -> FullSetDifficultyResult:
-    density = profile.target_density
+    target = profile.default_stars if target_stars is None else target_stars
+    density = base_config.target_density or profile.target_density
     flow_scale = 1.0
     best: tuple[BeatmapDocument, float, float, float, int] | None = None
     history: list[CalibrationAttempt] = []
@@ -289,7 +293,7 @@ def _generate_full_set_difficulty(
             else "coarse-density"
         )
         progress(
-            f"Generating {profile.label} {profile.default_stars:.2f}★ "
+            f"Generating {profile.label} {target:.2f}★ "
             f"(precision {star_precision:.3f}★, {phase}, attempt {attempt}/{max_attempts}, "
             f"density {density:.3f}, spacing {flow_scale:.3f}×)"
         )
@@ -297,7 +301,7 @@ def _generate_full_set_difficulty(
             base_config,
             mode=GameMode.STANDARD,
             difficulty_tier=profile.key,
-            target_stars=profile.default_stars,
+            target_stars=target,
             target_density=density,
             rhythm_threshold=rhythm_threshold,
             enforce_star_target=False,
@@ -312,7 +316,7 @@ def _generate_full_set_difficulty(
             progress,
         )
         actual_stars = calculate_standard_stars(generated)
-        error = abs(actual_stars - profile.default_stars)
+        error = abs(actual_stars - target)
         object_count = sum(
             bool(line.strip()) and not line.lstrip().startswith("//")
             for line in generated.sections().get("HitObjects", [])
@@ -329,7 +333,7 @@ def _generate_full_set_difficulty(
                 rhythm_threshold=rhythm_threshold,
             )
         )
-        if best is None or error < abs(best[1] - profile.default_stars):
+        if best is None or error < abs(best[1] - target):
             best = (generated, actual_stars, density, flow_scale, attempt)
         if profile.contains(actual_stars) and error <= star_precision:
             progress(
@@ -355,7 +359,7 @@ def _generate_full_set_difficulty(
             )
             next_threshold = _next_plateau_threshold(
                 current_threshold,
-                profile.default_stars,
+                target,
                 actual_stars,
             )
             if abs(next_threshold - current_threshold) > 1e-6:
@@ -384,7 +388,7 @@ def _generate_full_set_difficulty(
             flow_scale = _next_precision_flow(
                 history,
                 density=density,
-                target_stars=profile.default_stars,
+                target_stars=target,
             )
         else:
             fine_density = None
@@ -393,11 +397,12 @@ def _generate_full_set_difficulty(
                 density,
                 flow_scale,
                 actual_stars,
+                target,
             )
     assert best is not None
     _best_document, actual_stars, used_density, used_flow_scale, _attempts = best
     raise GenerationError(
-        f"FullSet-v1 could not reach {profile.label} {profile.default_stars:.2f}★ "
+        f"Star calibration could not reach {profile.label} {target:.2f}★ "
         f"within the requested ±{star_precision:.3f}★ after {max_attempts} attempts. "
         f"Best result was {actual_stars:.2f}★ at density {used_density:.3f} and "
         f"spacing {used_flow_scale:.3f}×. "
@@ -418,6 +423,22 @@ def _assert_gameplay_safe(report: dict[str, Any], profile: StandardDifficulty) -
     raise GenerationError(
         f"Generated {profile.label} failed objective gameplay safety checks: {detail}."
     )
+
+
+def _calibration_history_rows(result: FullSetDifficultyResult) -> list[dict[str, Any]]:
+    return [
+        {
+            "attempt": item.attempt,
+            "phase": item.phase,
+            "density": item.density,
+            "flow_scale": item.flow_scale,
+            "object_count": item.object_count,
+            "rhythm_threshold": item.rhythm_threshold,
+            "actual_stars": item.actual_stars,
+            "star_error": item.star_error,
+        }
+        for item in result.calibration_history
+    ]
 
 
 def _cache_exclusions(root: Path) -> set[Path]:
@@ -491,19 +512,7 @@ def _write_full_set_reports(
                     abs(result.actual_stars - result.profile.default_stars)
                     <= result.requested_precision
                 ),
-                "calibration_history": [
-                    {
-                        "attempt": item.attempt,
-                        "phase": item.phase,
-                        "density": item.density,
-                        "flow_scale": item.flow_scale,
-                        "object_count": item.object_count,
-                        "rhythm_threshold": item.rhythm_threshold,
-                        "actual_stars": item.actual_stars,
-                        "star_error": item.star_error,
-                    }
-                    for item in result.calibration_history
-                ],
+                "calibration_history": _calibration_history_rows(result),
                 "criteria_summary": reports[result.profile.key]["summary"],
                 "pattern_summary": reports[result.profile.key].get("pattern_summary"),
                 "map_name": generated_map_name(
@@ -689,14 +698,32 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
                 expected_audio_count=1,
             )
         else:
-            generated = generate_document(
-                workspace.document,
-                workspace.audio,
-                workspace.root,
-                preset,
-                config,
-                progress,
-            )
+            calibrated_result: FullSetDifficultyResult | None = None
+            if requested_difficulty is not None and request.enforce_star_target:
+                profile, target_stars = requested_difficulty
+                progress(f"Starting calibrated {profile.label} generation at {target_stars:.2f}★")
+                calibrated_result = _generate_full_set_difficulty(
+                    workspace.document,
+                    workspace.audio,
+                    workspace.root,
+                    preset,
+                    config,
+                    profile,
+                    request.star_precision,
+                    request.calibration_attempts,
+                    progress,
+                    target_stars=target_stars,
+                )
+                generated = calibrated_result.document
+            else:
+                generated = generate_document(
+                    workspace.document,
+                    workspace.audio,
+                    workspace.root,
+                    preset,
+                    config,
+                    progress,
+                )
             generated_path = workspace.document.path.parent / generated_map_name(
                 generated, preset.name
             )
@@ -706,6 +733,18 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
                     generated_path,
                     map_label=generated_path.name,
                 )
+                if calibrated_result is not None:
+                    criteria_report["star_calibration"] = {
+                        "algorithm": "adaptive-density-threshold-then-spacing-v2",
+                        "target_stars": requested_difficulty[1],
+                        "actual_stars": calibrated_result.actual_stars,
+                        "star_error": abs(calibrated_result.actual_stars - requested_difficulty[1]),
+                        "requested_star_precision": calibrated_result.requested_precision,
+                        "precision_target_met": True,
+                        "attempts": calibrated_result.attempts,
+                        "calibration_history": _calibration_history_rows(calibrated_result),
+                    }
+                    _assert_gameplay_safe(criteria_report, calibrated_result.profile)
                 summary = criteria_report["summary"]
                 progress(
                     "Audited objective osu!standard criteria: "

@@ -130,16 +130,17 @@ Choose the tier and an exact target inside that tier:
 uv run osumapper generate song.osz --rhythm-engine modern --modern-model models/modern/rhythm-conformer-v4-standard-stars --difficulty-tier hard --target-stars 3.50 --open
 ```
 
-The generated `.osu` is recalculated after rhythm and placement. The package is
-created only when its real star value is inside the selected band and within
-±0.25★ of the requested target; otherwise the command reports the measured value
-and asks for a density adjustment or more V4 training data. This prevents a
-filename from claiming a difficulty the map did not actually achieve.
+The generated `.osu` is recalculated after rhythm and placement. Single-tier
+generation uses the same bounded density, probability-threshold, and spacing
+calibration as a full set. By default the package is created only when its real
+star value is inside the selected band and within `±0.03★` of the requested target.
+Its `.criteria.json` records every calibration attempt. This prevents a filename
+from claiming a difficulty the map did not actually achieve.
 
 ## Generate a complete six-difficulty set
 
 FullSet-v1 analyzes/caches the source audio in one isolated workspace, runs the
-star-conditioned V4 model for all six fixed targets, and writes exactly six `.osu`
+selected star-conditioned model for all six fixed targets, and writes exactly six `.osu`
 files with one shared audio file. Precision calibration uses up to 16 bounded
 attempts per tier by default. Its coarse phase adjusts density, detects when the
 model's selected rhythm has saturated, and then adapts the tier probability
@@ -165,7 +166,8 @@ The command writes `song-full-set.full-set.json` plus one
 circle, slider, and spinner counts plus heuristic jump, burst, stream, stack, and
 position-diversity measurements. The set report records every density/spacing
 attempt, its measured no-mod star rating, achieved error, calibration phase, and
-whether every requested precision target was met. FullSet-v1 runs V4 independently for each tier;
+whether every requested precision target was met. FullSet-v1 runs the selected
+model independently for each tier;
 learned event nesting and one-pass shared inference require Conformer-v5. The
 output is a local draft and is not eligible for ranking.
 
@@ -316,10 +318,10 @@ The most useful `generate` options are:
 | `--preset NAME` | Select the model and generation parameters. |
 | `--mode MODE` | Select a ruleset for legacy compatibility; Conformer-v4 accepts only `standard`. |
 | `--difficulty TEXT` | Select a difficulty from a multi-map `.osz`. |
-| `--difficulty-tier NAME` | Select `easy`, `normal`, `hard`, `insane`, `expert`, or `expert-plus` for V4 output. |
+| `--difficulty-tier NAME` | Select `easy`, `normal`, `hard`, `insane`, `expert`, or `expert-plus` for star-conditioned output. |
 | `--target-stars NUMBER` | Fix the requested no-mod standard star target inside the selected tier. |
 | `--full-set` | Generate all six fixed standard tiers in one validated `.osz`. |
-| `--star-precision NUMBER` | Require each full-set tier to land within this many stars; default `0.03`, range `0.001`–`0.25`. |
+| `--star-precision NUMBER` | Require each calibrated single or full-set tier to land within this many stars; default `0.03`, range `0.001`–`0.25`. |
 | `--calibration-attempts INTEGER` | Bound coarse and fine precision attempts per tier; default `16`, range `1`–`30`. |
 | `--seed INTEGER` | Set the deterministic seed; the default is `2026`. |
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
