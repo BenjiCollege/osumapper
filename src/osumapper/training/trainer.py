@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from osumapper.config import configure_determinism
-from osumapper.difficulty import LEGACY_DIFFICULTY_FEATURES, STAR_DIFFICULTY_FEATURES
+from osumapper.difficulty import (
+    LEGACY_DIFFICULTY_FEATURES,
+    STAR_DIFFICULTY_FEATURES,
+    V5_DIFFICULTY_FEATURES,
+)
 from osumapper.errors import DependencyError, InputError
 from osumapper.paths import legacy_v7_root, project_root
 from osumapper.training import MODERN_RHYTHM_MODEL_VERSION
@@ -44,6 +48,7 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
 
 def default_model_root(architecture: str = "conformer-v4") -> Path:
     name = {
+        "conformer-v5": "rhythm-conformer-v5-full-set",
         "conformer-v4": "rhythm-conformer-v4-standard-stars",
         "conformer-v3": "rhythm-conformer-v3",
         "conformer-v2": "rhythm-conformer-v2",
@@ -196,11 +201,10 @@ def train_rhythm(
         sequence_length=training_config.sequence_length,
         prediction_threshold=training_config.prediction_threshold,
     )
-    difficulty_features = (
-        STAR_DIFFICULTY_FEATURES
-        if training_config.architecture == "conformer-v4"
-        else LEGACY_DIFFICULTY_FEATURES
-    )
+    difficulty_features = {
+        "conformer-v4": STAR_DIFFICULTY_FEATURES,
+        "conformer-v5": V5_DIFFICULTY_FEATURES,
+    }.get(training_config.architecture, LEGACY_DIFFICULTY_FEATURES)
     train_dataset, train_summary = make_tf_dataset(
         train_rows,
         dataset_root=paths.root,
@@ -312,7 +316,8 @@ def train_rhythm(
                 jit_compile=jit_compile,
                 optimizer_name=(
                     "adamw"
-                    if training_config.architecture in {"conformer-v3", "conformer-v4"}
+                    if training_config.architecture
+                    in {"conformer-v3", "conformer-v4", "conformer-v5"}
                     else "adam"
                 ),
                 weight_decay=training_config.weight_decay,

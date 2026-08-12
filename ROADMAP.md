@@ -40,7 +40,7 @@ FullSet-v1 deliberately uses independent V4 passes. It provides the product and
 validation boundary needed to measure V5 honestly; it does not claim learned
 cross-tier nesting, section planning, or Placement-v2 quality.
 
-## Phase 2 — Curated training data
+## Phase 2 — Curated training data (prototype established)
 
 - Mark only trusted human-authored maps as GOOD.
 - Start with 50–100 distinct songs per lower tier and 200–300 trusted Expert and
@@ -50,7 +50,12 @@ cross-tier nesting, section planning, or Placement-v2 quality.
 - Freeze song-grouped train/validation/test splits at seed 2026.
 - Never train on uncorrected model output.
 
-## Phase 3 — Conformer-v5 Full-Set
+The first frozen prototype contains 30 user-approved songs and 225 GOOD standard
+maps at seed 2026. Its benchmark manifest intentionally reports
+`curated-prototype`: it validates the workflow but does not meet the production
+quantity or untouched-test coverage gates above.
+
+## Phase 3 — Conformer-v5 Full-Set (initial six-head model implemented)
 
 - One shared audio encoder evaluated once per song.
 - Six difficulty-specific rhythm heads with larger Expert/Expert+ capacity.
@@ -63,6 +68,12 @@ cross-tier nesting, section planning, or Placement-v2 quality.
 
 V5 is accepted only when it beats frozen V4 on the same split and review rubric.
 Frozen MERT features are an optional controlled ablation after the core V5 result.
+
+The initial implementation covers the shared difficulty-independent encoder, six
+tier-specific rhythm heads, larger Expert heads, tier-weighted loss, deterministic
+window shards, and expanded ±20/±35 ms/per-tier evaluation. One-pass full-set
+inference, cross-tier nesting, auxiliary musical targets, and controlled V4/V5
+human A/B review remain open and are not claimed by the prototype.
 
 ## Phase 4 — Placement-v2
 

@@ -20,6 +20,7 @@ from osumapper.difficulty import (
     LEGACY_DIFFICULTY_FEATURES,
     STANDARD_DIFFICULTY_KEYS,
     STAR_DIFFICULTY_FEATURES,
+    V5_DIFFICULTY_FEATURES,
 )
 from osumapper.errors import OsumapperError
 from osumapper.lazer import find_lazer_executable
@@ -40,6 +41,7 @@ from osumapper.pipeline import (
 from osumapper.presets import preset_names
 from osumapper.stable import scan_stable_maps, write_maplist
 from osumapper.training.analysis import analyze_map
+from osumapper.training.benchmark import build_dataset_benchmark
 from osumapper.training.calibration import calibrate_threshold
 from osumapper.training.config import (
     AudioFeatureConfig,
@@ -210,6 +212,12 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_stats = dataset_sub.add_parser("stats", help="summarize the local dataset")
     dataset_stats.add_argument("--data-root", type=Path)
 
+    dataset_benchmark = dataset_sub.add_parser(
+        "benchmark", help="freeze and audit the curated V5 dataset contract"
+    )
+    dataset_benchmark.add_argument("--data-root", type=Path)
+    dataset_benchmark.add_argument("--output", type=Path)
+
     dataset_rate = dataset_sub.add_parser("rate", help="manually rate a beatmap")
     dataset_rate.add_argument("map", type=Path)
     dataset_rate.add_argument("rating", choices=("good", "bad", "ignore"))
@@ -261,8 +269,14 @@ def _build_parser() -> argparse.ArgumentParser:
     dataset_windows.add_argument("--audio-context-radius", type=int, default=0)
     dataset_windows.add_argument(
         "--architecture",
-        choices=("transformer-v1", "conformer-v2", "conformer-v3", "conformer-v4"),
-        default="conformer-v4",
+        choices=(
+            "transformer-v1",
+            "conformer-v2",
+            "conformer-v3",
+            "conformer-v4",
+            "conformer-v5",
+        ),
+        default="conformer-v5",
     )
     dataset_windows.add_argument("--rebuild", action="store_true")
 
@@ -311,13 +325,19 @@ def _build_parser() -> argparse.ArgumentParser:
     train_rhythm_parser.add_argument("--threshold", type=float, default=0.5)
     train_rhythm_parser.add_argument(
         "--architecture",
-        choices=("transformer-v1", "conformer-v2", "conformer-v3", "conformer-v4"),
-        default="conformer-v4",
+        choices=(
+            "transformer-v1",
+            "conformer-v2",
+            "conformer-v3",
+            "conformer-v4",
+            "conformer-v5",
+        ),
+        default="conformer-v5",
     )
     train_rhythm_parser.add_argument(
         "--audio-context-radius",
         type=int,
-        help="feature frames on each side (default: 4 for v2, 0 for v1/v3/v4)",
+        help="feature frames on each side (default: 4 for v2, 0 for v1/v3/v4/v5)",
     )
 
     train_placement_parser = train_sub.add_parser(
@@ -551,6 +571,14 @@ def _dataset(args: argparse.Namespace) -> int:
     if args.dataset_command == "stats":
         print(json.dumps(dataset_statistics(dataset_root=args.data_root), indent=2))
         return 0
+    if args.dataset_command == "benchmark":
+        print(
+            json.dumps(
+                build_dataset_benchmark(dataset_root=args.data_root, output=args.output),
+                indent=2,
+            )
+        )
+        return 0
     if args.dataset_command == "rate":
         result = rate_map(args.map, args.rating, dataset_root=args.data_root)
         print(json.dumps(result, indent=2))
@@ -601,11 +629,10 @@ def _dataset(args: argparse.Namespace) -> int:
         if args.sequence_length <= 0 or not 0 <= args.audio_context_radius <= 32:
             raise OsumapperError("Sequence length must be positive and context must be 0-32.")
         summaries: dict[str, Any] = {}
-        difficulty_features = (
-            STAR_DIFFICULTY_FEATURES
-            if args.architecture == "conformer-v4"
-            else LEGACY_DIFFICULTY_FEATURES
-        )
+        difficulty_features = {
+            "conformer-v4": STAR_DIFFICULTY_FEATURES,
+            "conformer-v5": V5_DIFFICULTY_FEATURES,
+        }.get(args.architecture, LEGACY_DIFFICULTY_FEATURES)
         for split in ("train", "validation", "test"):
             rows = load_split(split, dataset_root=args.data_root)
             if not rows:

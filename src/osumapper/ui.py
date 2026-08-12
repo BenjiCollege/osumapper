@@ -347,9 +347,9 @@ class OsumapperStudio:
         self.songs_root = tk.StringVar(value=str(dataset_config.get("songs_root", "")))
         self.include_unrated = tk.BooleanVar(value=False)
         self.trust_imported_osz = tk.BooleanVar(value=False)
-        self.train_architecture = tk.StringVar(value="conformer-v4")
+        self.train_architecture = tk.StringVar(value="conformer-v5")
         self.train_output = tk.StringVar(
-            value=str(root / "models" / "modern" / "rhythm-conformer-v4-standard-stars")
+            value=str(root / "models" / "modern" / "rhythm-conformer-v5-full-set")
         )
         self.placement_output = tk.StringVar(value=str(root / "models" / "modern" / "placement-v1"))
         self.epochs = tk.StringVar(value="50")
@@ -585,8 +585,9 @@ class OsumapperStudio:
             ("2  Append reviewed .osz folder", "import-osz"),
             ("3  Stats", "stats"),
             ("4  Split", "split"),
-            ("5  Features", "features"),
-            ("6  Window shards", "windows"),
+            ("5  Freeze quality benchmark", "benchmark"),
+            ("6  Features", "features"),
+            ("7  Window shards", "windows"),
         ):
             ttk.Button(
                 dataset_buttons,
@@ -619,8 +620,8 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Conformer-v4 learns osu!standard rhythm from real star ratings and the six "
-                "fixed difficulty tiers. Existing v1/v2/v3 models remain unchanged."
+                "Conformer-v5 shares one music encoder across six independently learned "
+                "osu!standard rhythm heads, with extra Expert and Expert+ training weight."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -629,7 +630,13 @@ class OsumapperStudio:
             model,
             "Architecture",
             self.train_architecture,
-            ("conformer-v4", "conformer-v3", "conformer-v2", "transformer-v1"),
+            (
+                "conformer-v5",
+                "conformer-v4",
+                "conformer-v3",
+                "conformer-v2",
+                "transformer-v1",
+            ),
         )
 
         self._path_row(model, "Model output", self.train_output, self._choose_train_output)
@@ -679,7 +686,10 @@ class OsumapperStudio:
         ttk.Label(model, text="Placement-v1", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             model,
-            text="Learn flow, object types, slider lengths, and combo changes after rhythm-v4.",
+            text=(
+                "Learn relative flow, object types, slider lengths, and combo changes "
+                "after rhythm-v5."
+            ),
             style="CardText.TLabel",
             wraplength=410,
         ).pack(anchor="w", pady=(3, 8))

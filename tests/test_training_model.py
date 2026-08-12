@@ -15,6 +15,7 @@ from osumapper.engine import generate_document
 from osumapper.errors import InputError
 from osumapper.presets import get_preset
 from osumapper.training.analysis import analyze_map
+from osumapper.training.benchmark import build_dataset_benchmark
 from osumapper.training.calibration import calibrate_threshold
 from osumapper.training.config import QualityConfig, RhythmTrainingConfig
 from osumapper.training.dataset import rate_map, scan_dataset
@@ -140,6 +141,43 @@ class TrainingModelTests(unittest.TestCase):
         self.assertEqual(model.input["difficulty"].shape[-1], 2)
         self.assertEqual(prediction.shape, (1, 16, 1))
 
+    def test_conformer_v5_has_six_round_trip_difficulty_heads(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            model = build_rhythm_model(
+                audio_dimension=20,
+                grid_dimension=6,
+                difficulty_dimension=7,
+                sequence_length=16,
+                architecture="conformer-v5",
+                model_dimension=48,
+                transformer_blocks=1,
+                attention_heads=6,
+                jit_compile=False,
+            )
+            inputs = {
+                "audio_features": np.zeros((1, 16, 20), dtype=np.float32),
+                "grid_features": np.zeros((1, 16, 6), dtype=np.float32),
+                "difficulty": np.asarray([[0.7, 0, 0, 0, 0, 0, 1]], dtype=np.float32),
+            }
+            inputs["grid_features"][0, :4, 0] = 0.4
+            prediction = model.predict(inputs, verbose=0)
+            all_heads = model.get_layer("difficulty_head_probabilities").output
+            import keras
+
+            head_model = keras.Model(model.input, all_heads)
+            tier_predictions = head_model.predict(inputs, verbose=0)
+            destination = Path(name) / "conformer-v5.keras"
+            model.save(destination)
+            reloaded = load_rhythm_model(destination, compile_model=False).predict(
+                inputs, verbose=0
+            )
+
+            self.assertEqual(model.name, "osumapper_rhythm_conformer_v5")
+            self.assertEqual(prediction.shape, (1, 16, 1))
+            self.assertEqual(tier_predictions.shape, (1, 16, 6))
+            np.testing.assert_allclose(prediction, tier_predictions[:, :, 5:6], atol=1e-6)
+            np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
+
     def test_placement_analyzer_reports_safe_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -213,6 +251,7 @@ class TrainingModelTests(unittest.TestCase):
                 progress=lambda _message: None,
             )
             split_dataset(dataset_root=data_root, seed=2026)
+            benchmark = build_dataset_benchmark(dataset_root=data_root)
             extract_dataset_features(dataset_root=data_root, progress=lambda _message: None)
             train_rows = load_split("train", dataset_root=data_root)
             examples = list(iter_windows(train_rows, dataset_root=data_root))
@@ -222,6 +261,8 @@ class TrainingModelTests(unittest.TestCase):
             self.assertGreater(summary.audio_dimension, 100)
             self.assertEqual(summary.grid_dimension, 6)
             self.assertGreater(summary.positives, 0)
+            self.assertEqual(benchmark["status"], "curated-prototype")
+            self.assertTrue(benchmark["gates"]["no_song_leakage"])
 
             model_root = root / "modern-model"
             result = train_rhythm(

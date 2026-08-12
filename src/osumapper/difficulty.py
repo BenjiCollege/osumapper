@@ -51,7 +51,20 @@ STANDARD_DIFFICULTIES: tuple[StandardDifficulty, ...] = (
 STANDARD_DIFFICULTY_KEYS = tuple(profile.key for profile in STANDARD_DIFFICULTIES)
 STAR_TARGET_TOLERANCE = 0.25
 STAR_DIFFICULTY_FEATURES = ("target_star_rating", "difficulty_tier")
+V5_DIFFICULTY_FEATURES = (
+    "target_star_rating",
+    "tier_easy",
+    "tier_normal",
+    "tier_hard",
+    "tier_insane",
+    "tier_expert",
+    "tier_expert_plus",
+)
 LEGACY_DIFFICULTY_FEATURES = ("OD", "AR", "CS", "objects_per_second")
+
+
+def is_star_conditioned(features: tuple[str, ...]) -> bool:
+    return features in {STAR_DIFFICULTY_FEATURES, V5_DIFFICULTY_FEATURES}
 
 
 def standard_difficulty(value: str) -> StandardDifficulty:

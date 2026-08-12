@@ -45,24 +45,35 @@ def build_rhythm_model(
         "conformer-v2": "conformer-v2",
         "conformer-v3": "conformer-v3",
         "conformer-v4": "conformer-v4",
+        "conformer-v5": "conformer-v5",
     }
     try:
         selected_architecture = aliases[architecture.casefold()]
     except KeyError as exc:
         raise InputError(
-            "Architecture must be transformer-v1, conformer-v2, conformer-v3, or conformer-v4."
+            "Architecture must be transformer-v1 or conformer-v2 through conformer-v5."
         ) from exc
     conformer = selected_architecture.startswith("conformer-")
     dimension = model_dimension or (
-        160
+        192
+        if selected_architecture == "conformer-v5"
+        else 160
         if selected_architecture in {"conformer-v3", "conformer-v4"}
         else 192
         if conformer
         else 128
     )
-    blocks = transformer_blocks or (4 if conformer else 3)
+    blocks = transformer_blocks or (
+        5 if selected_architecture == "conformer-v5" else 4 if conformer else 3
+    )
     heads = attention_heads or (
-        5 if selected_architecture in {"conformer-v3", "conformer-v4"} else 6 if conformer else 4
+        6
+        if selected_architecture == "conformer-v5"
+        else 5
+        if selected_architecture in {"conformer-v3", "conformer-v4"}
+        else 6
+        if conformer
+        else 4
     )
     if dimension % heads:
         raise InputError("Model dimension must be divisible by attention heads.")
@@ -73,20 +84,30 @@ def build_rhythm_model(
         (sequence_length, grid_dimension), name="grid_features", dtype="float32"
     )
     difficulty_input = keras.Input((difficulty_dimension,), name="difficulty", dtype="float32")
+    if selected_architecture == "conformer-v5" and difficulty_dimension != 7:
+        raise InputError("Conformer-v5 requires target stars plus six one-hot tier features.")
 
     audio = keras.layers.Conv1D(
         dimension, kernel_size=5, padding="same", activation="gelu", name="audio_encoder"
     )(audio_input)
     audio = keras.layers.LayerNormalization(name="audio_normalization")(audio)
     grid = keras.layers.Dense(dimension // 2, activation="gelu", name="grid_encoder")(grid_input)
-    difficulty = keras.layers.Dense(dimension // 2, activation="gelu", name="difficulty_encoder")(
-        difficulty_input
-    )
-    difficulty = keras.layers.RepeatVector(sequence_length, name="difficulty_broadcast")(difficulty)
-    combined = keras.layers.Concatenate(name="feature_fusion")([audio, grid, difficulty])
+    if selected_architecture == "conformer-v5":
+        # Keep difficulty outside the shared song encoder. All six heads see
+        # the same encoded music and grid; the one-hot tier input only selects
+        # which head receives the loss for this curated human difficulty.
+        combined = keras.layers.Concatenate(name="shared_feature_fusion")([audio, grid])
+    else:
+        difficulty = keras.layers.Dense(
+            dimension // 2, activation="gelu", name="difficulty_encoder"
+        )(difficulty_input)
+        difficulty = keras.layers.RepeatVector(sequence_length, name="difficulty_broadcast")(
+            difficulty
+        )
+        combined = keras.layers.Concatenate(name="feature_fusion")([audio, grid, difficulty])
     sequence = keras.layers.Dense(dimension, name="fusion_projection")(combined)
     attention_mask = None
-    if selected_architecture in {"conformer-v3", "conformer-v4"}:
+    if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}:
         # The musical grid is non-zero for every real candidate and zero for
         # padded positions, so this prevents padding from affecting attention.
         valid_steps = keras.ops.any(keras.ops.not_equal(grid_input, 0.0), axis=-1)
@@ -154,7 +175,7 @@ def build_rhythm_model(
             convolution = keras.layers.LayerNormalization(
                 name=f"conformer_convolution_norm_{block}"
             )(sequence)
-            if selected_architecture in {"conformer-v3", "conformer-v4"}:
+            if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}:
                 convolution_value = keras.layers.Dense(
                     dimension,
                     name=f"conformer_convolution_value_{block}",
@@ -183,7 +204,7 @@ def build_rhythm_model(
             )(convolution)
             normalization = (
                 keras.layers.LayerNormalization
-                if selected_architecture in {"conformer-v3", "conformer-v4"}
+                if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}
                 else keras.layers.BatchNormalization
             )
             convolution = normalization(name=f"conformer_convolution_batch_norm_{block}")(
@@ -222,9 +243,51 @@ def build_rhythm_model(
     sequence = keras.layers.LayerNormalization(name="output_normalization")(sequence)
     # Mixed precision keeps the expensive encoder on Tensor Cores, while a
     # float32 probability head avoids underflow in calibration and weighted BCE.
-    output = keras.layers.Dense(1, activation="sigmoid", dtype="float32", name="hit_probability")(
-        sequence
-    )
+    if selected_architecture == "conformer-v5":
+        tier_names = ("easy", "normal", "hard", "insane", "expert", "expert_plus")
+        tier_outputs = []
+        star_context = keras.layers.Dense(16, activation="gelu", name="target_star_encoder")(
+            difficulty_input[:, :1]
+        )
+        star_context = keras.layers.RepeatVector(sequence_length, name="target_star_broadcast")(
+            star_context
+        )
+        head_input = keras.layers.Concatenate(name="difficulty_head_input")(
+            [sequence, star_context]
+        )
+        for index, tier_name in enumerate(tier_names):
+            # Expert heads have extra capacity for complex rhythms while all
+            # heads retain independent decision boundaries.
+            head_dimension = dimension if index >= 4 else dimension // 2
+            head = keras.layers.Dense(
+                head_dimension,
+                activation="gelu",
+                name=f"{tier_name}_rhythm_head",
+            )(head_input)
+            head = keras.layers.Dropout(dropout, name=f"{tier_name}_head_dropout")(head)
+            tier_outputs.append(
+                keras.layers.Dense(
+                    1,
+                    activation="sigmoid",
+                    dtype="float32",
+                    name=f"{tier_name}_probability",
+                )(head)
+            )
+        all_tiers = keras.layers.Concatenate(name="difficulty_head_probabilities")(tier_outputs)
+        tier_selector = keras.layers.RepeatVector(sequence_length, name="tier_selector_broadcast")(
+            difficulty_input[:, 1:]
+        )
+        selected_tier = keras.layers.Multiply(name="select_difficulty_head")(
+            [all_tiers, tier_selector]
+        )
+        selected_tier = keras.ops.sum(selected_tier, axis=-1, keepdims=True)
+        output = keras.layers.Activation("linear", dtype="float32", name="hit_probability")(
+            selected_tier
+        )
+    else:
+        output = keras.layers.Dense(
+            1, activation="sigmoid", dtype="float32", name="hit_probability"
+        )(sequence)
     model = keras.Model(
         inputs={
             "audio_features": audio_input,
@@ -244,7 +307,9 @@ def build_rhythm_model(
         positive_weight=positive_weight,
         jit_compile=jit_compile,
         optimizer_name=(
-            "adamw" if selected_architecture in {"conformer-v3", "conformer-v4"} else "adam"
+            "adamw"
+            if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}
+            else "adam"
         ),
         weight_decay=weight_decay,
     )

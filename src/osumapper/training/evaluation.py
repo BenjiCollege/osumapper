@@ -46,6 +46,19 @@ def match_events(
     return len(errors), errors
 
 
+def _event_metrics(*, matched: int, predicted: int, human: int) -> dict[str, float | int]:
+    precision = matched / predicted if predicted else 0.0
+    recall = matched / human if human else 0.0
+    return {
+        "matched": matched,
+        "predicted": predicted,
+        "human": human,
+        "precision": precision,
+        "recall": recall,
+        "f1": 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0,
+    }
+
+
 def evaluate_rhythm(
     *,
     dataset_root: Path | None = None,
@@ -95,6 +108,15 @@ def evaluate_rhythm(
     timing_errors: list[float] = []
     density_errors: list[float] = []
     map_reports: list[dict[str, Any]] = []
+    tolerance_totals = {
+        20: {"matched": 0, "predicted": 0, "human": 0},
+        35: {"matched": 0, "predicted": 0, "human": 0},
+    }
+    tier_values: dict[str, dict[str, list[Any]]] = {}
+    alignment = {
+        "predicted": {"events": 0, "beats": 0, "downbeats": 0},
+        "human": {"events": 0, "beats": 0, "downbeats": 0},
+    }
     for row in test_rows:
         map_threshold = prediction_threshold(
             config,
@@ -119,6 +141,15 @@ def evaluate_rhythm(
             for obj in read_json(Path(str(row["map_json_path"])), default={}).get("hit_objects", [])
         ]
         matched, errors = match_events(predicted_times, human_times)
+        tolerance_matches: dict[str, int] = {}
+        for tolerance, totals in tolerance_totals.items():
+            tolerance_matched, _ = match_events(
+                predicted_times, human_times, tolerance_ms=float(tolerance)
+            )
+            totals["matched"] += tolerance_matched
+            totals["predicted"] += len(predicted_times)
+            totals["human"] += len(human_times)
+            tolerance_matches[f"matched_at_{tolerance}ms"] = tolerance_matched
         timing_errors.extend(errors)
         duration_seconds = max(1e-6, float(row["map_duration_ms"]) / 1000.0)
         density_error = abs(len(predicted_times) - len(human_times)) / duration_seconds
@@ -126,6 +157,24 @@ def evaluate_rhythm(
         all_labels.extend(labels.tolist())
         all_probabilities.extend(probabilities.tolist())
         all_predictions.extend(predictions.tolist())
+        tier = str(row.get("difficulty_tier", "unknown"))
+        bucket = tier_values.setdefault(
+            tier, {"labels": [], "probabilities": [], "predictions": []}
+        )
+        bucket["labels"].extend(labels.tolist())
+        bucket["probabilities"].extend(probabilities.tolist())
+        bucket["predictions"].extend(predictions.tolist())
+        for index, candidate in enumerate(prepared.grid.candidates):
+            on_beat = candidate.subdivision_index == 0
+            on_downbeat = on_beat and abs(candidate.measure_position) < 1e-6
+            if predictions[index]:
+                alignment["predicted"]["events"] += 1
+                alignment["predicted"]["beats"] += int(on_beat)
+                alignment["predicted"]["downbeats"] += int(on_downbeat)
+            if labels[index]:
+                alignment["human"]["events"] += 1
+                alignment["human"]["beats"] += int(on_beat)
+                alignment["human"]["downbeats"] += int(on_downbeat)
         map_reports.append(
             {
                 "map_id": row["map_id"],
@@ -141,13 +190,40 @@ def evaluate_rhythm(
                 "extra_predictions": len(predicted_times) - matched,
                 "density_error_objects_per_second": density_error,
                 "mean_timing_error_ms": sum(errors) / len(errors) if errors else None,
+                **tolerance_matches,
             }
         )
     precision_score, recall_score, f1_score, average_precision_score = _require_metrics()
     labels_array = np.asarray(all_labels, dtype=int)
     probability_array = np.asarray(all_probabilities, dtype=float)
     prediction_array = np.asarray(all_predictions, dtype=bool)
+    per_tier: dict[str, dict[str, Any]] = {}
+    for tier, values in sorted(tier_values.items()):
+        tier_labels = np.asarray(values["labels"], dtype=int)
+        tier_probabilities = np.asarray(values["probabilities"], dtype=float)
+        tier_predictions = np.asarray(values["predictions"], dtype=bool)
+        per_tier[tier] = {
+            "candidate_positions": int(tier_labels.size),
+            "positive_positions": int(tier_labels.sum()),
+            "precision": float(precision_score(tier_labels, tier_predictions, zero_division=0)),
+            "recall": float(recall_score(tier_labels, tier_predictions, zero_division=0)),
+            "f1": float(f1_score(tier_labels, tier_predictions, zero_division=0)),
+            "pr_auc": (
+                float(average_precision_score(tier_labels, tier_probabilities))
+                if tier_labels.sum()
+                else None
+            ),
+        }
+    musical_alignment: dict[str, Any] = {}
+    for source, values in alignment.items():
+        events = int(values["events"])
+        musical_alignment[source] = {
+            **values,
+            "beat_ratio": values["beats"] / events if events else 0.0,
+            "downbeat_ratio": values["downbeats"] / events if events else 0.0,
+        }
     report = {
+        "benchmark_version": 2,
         "split": "test",
         "model": str(model_path),
         "threshold": grid_config.prediction_threshold,
@@ -163,6 +239,12 @@ def evaluate_rhythm(
         "mean_timing_error_ms": sum(timing_errors) / len(timing_errors) if timing_errors else None,
         "median_timing_error_ms": float(np.median(timing_errors)) if timing_errors else None,
         "mean_density_error_objects_per_second": sum(density_errors) / len(density_errors),
+        "timing_tolerances": {
+            f"{tolerance}ms": _event_metrics(**totals)
+            for tolerance, totals in tolerance_totals.items()
+        },
+        "musical_alignment": musical_alignment,
+        "difficulty_tiers": per_tier,
         "maps": map_reports,
     }
     for key, value in report.items():

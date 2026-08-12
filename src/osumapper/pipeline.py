@@ -60,6 +60,7 @@ class GenerationRequest:
     key_count: int = 4
     open_in_lazer: bool = False
     full_set: bool = False
+    enforce_star_target: bool = True
     star_precision: float = FULL_SET_DEFAULT_STAR_PRECISION
     calibration_attempts: int = FULL_SET_DEFAULT_MAX_ATTEMPTS
 
@@ -106,6 +107,7 @@ def _base_config(
         target_density=request.target_density,
         difficulty_tier=(requested_difficulty[0].key if requested_difficulty else None),
         target_stars=(requested_difficulty[1] if requested_difficulty else None),
+        enforce_star_target=request.enforce_star_target,
     )
 
 

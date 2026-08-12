@@ -20,8 +20,9 @@ Give osumapper one favorite song and receive one playable osu!standard `.osz`
 containing Easy, Normal, Hard, Insane, Expert, and Expert+, with the strongest
 quality emphasis on Expert and Expert+. The current **FullSet-v1** implementation
 establishes the six-map packaging and validation boundary using Conformer-v4.
-Conformer-v5 Full-Set, Placement-v2, section-aware mapping, and learned
-cross-difficulty nesting remain research milestones—not completed features. See
+An initial Conformer-v5 prototype now supplies one shared music encoder and six
+tier-specific rhythm heads. One-pass full-set inference, auxiliary section heads,
+learned cross-difficulty nesting, and Placement-v2 remain research milestones. See
 [`ROADMAP.md`](ROADMAP.md) for the phased quality plan and release gates.
 
 The original 2020 implementations are preserved unchanged under [`v6.2/`](v6.2/)
@@ -47,7 +48,7 @@ baseline and compatibility policy.
   manifests.
 - An opt-in local osu!standard dataset, safe curated `.osz` ingestion,
   Transformer-v1, Conformer-v2, faster Conformer-v3, and star-conditioned
-  Conformer-v4 training,
+  Conformer-v4 training, plus an initial six-head Conformer-v5 training path,
   validation-only density calibration, held-out evaluation, and deterministic
   human-review packages.
 - Mixed-precision RTX training, optional XLA, float16 window shards, per-song
@@ -387,6 +388,86 @@ uv run osumapper stable-scan "C:\osu!" --mode standard --output maplist.txt
 ```
 
 ## Training a modern rhythm model locally
+
+### Curated Conformer-v5 prototype
+
+Conformer-v5 is standard-only. Its shared Conformer encoder learns audio and
+musical-grid context, followed by independent Easy, Normal, Hard, Insane,
+Expert, and Expert+ probability heads. A one-hot tier selector ensures that a
+human map updates only its corresponding head. Expert and Expert+ receive 1.5x
+and 2.0x training weight. The public model output remains one probability
+sequence so calibration, evaluation, and review generation stay compatible.
+
+The explicitly reviewed source currently used for the V5 prototype is
+`C:\Users\bcten\Downloads\good osu songs`. It contains 30 distinct songs and
+225 GOOD standard maps: 11 Easy, 28 Normal, 34 Hard, 63 Insane, 56 Expert, and
+33 Expert+. This is a useful curated prototype, not a production dataset. It is
+below the release targets of 100–150 trusted songs, 300 Expert/Expert+ maps, and
+30 untouched test songs per tier.
+
+Recreate the isolated WSL dataset without touching the V4 data:
+
+```bash
+cd "$HOME/osumapper"
+set +H
+
+uv run --extra gpu osumapper dataset scan \
+  '/mnt/c/Users/bcten/Downloads/good osu songs' \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811"
+
+uv run --extra gpu osumapper dataset rate-folder \
+  '/mnt/c/Users/bcten/Downloads/good osu songs' good \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811"
+
+uv run --extra gpu osumapper dataset split \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811" \
+  --seed 2026 --train-ratio 0.70 --validation-ratio 0.15 --test-ratio 0.15
+
+uv run --extra gpu osumapper dataset benchmark \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811"
+
+uv run --extra gpu osumapper dataset features \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811"
+
+uv run --extra gpu osumapper dataset windows \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811" \
+  --architecture conformer-v5 --sequence-length 512
+```
+
+Start the RTX 4070 run. Early stopping preserves the best validation PR-AUC and
+prevents blindly training all 50 epochs after validation quality stops improving:
+
+```bash
+cd "$HOME/osumapper"
+set +H
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train rhythm \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811" \
+  --output "$HOME/osumapper/models/modern/rhythm-conformer-v5-curated-prototype-seed-2026" \
+  --architecture conformer-v5 \
+  --epochs 50 --batch-size 32 --learning-rate 0.0005 \
+  --sequence-length 512 --audio-context-radius 0 \
+  --device gpu --precision mixed-float16 --xla auto \
+  --window-cache auto --early-stopping-patience 8 \
+  --weight-decay 0.0001 --seed 2026
+```
+
+After training, calibrate only on validation and evaluate once on untouched test
+songs:
+
+```bash
+uv run --extra gpu osumapper train calibrate rhythm \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v5-curated-prototype-seed-2026"
+
+uv run --extra gpu osumapper train evaluate rhythm \
+  --data-root "$HOME/osumapper/training_data/v5_curated_20260811" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v5-curated-prototype-seed-2026"
+```
+
+The V5 evaluation report includes rhythm precision, recall, and F1 at ±20 ms
+and ±35 ms, per-tier candidate metrics, musical beat/downbeat alignment, density
+error, and the frozen dataset hash. Do not tune against the test report; add more
+curated songs, create a new split, and train a separately named run.
 
 The modern rhythm engine is an **opt-in, osu!standard-only experiment**. No
 pretrained modern model is shipped, and the legacy rhythm engine remains the

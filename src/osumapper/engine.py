@@ -448,7 +448,8 @@ def generate_document(
                 f"Generated {actual_stars:.2f}★ for a requested {target_stars:.2f}★ "
                 f"{profile.label} target ({profile.range_label}, allowed target error "
                 f"±{STAR_TARGET_TOLERANCE:.2f}★). "
-                "Adjust --target-density or retrain Conformer-v4 with more maps in this band."
+                "Adjust --target-density or retrain the selected star-conditioned model "
+                "with more maps in this band."
             )
         status = "Measured" if target_missed else "Verified"
         progress(f"{status} {profile.label}: {actual_stars:.2f}★ for requested {target_stars:.2f}★")

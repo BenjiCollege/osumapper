@@ -12,7 +12,7 @@ import numpy as np
 from osumapper.beatmap import BeatmapDocument
 from osumapper.difficulty import (
     LEGACY_DIFFICULTY_FEATURES,
-    STAR_DIFFICULTY_FEATURES,
+    is_star_conditioned,
     resolve_standard_difficulty,
 )
 from osumapper.errors import InputError
@@ -79,11 +79,9 @@ def _difficulty(
         "star_rating": target_stars,
         "difficulty_tier": difficulty_tier,
     }
-    if feature_names == STAR_DIFFICULTY_FEATURES and (
-        target_stars is None or difficulty_tier is None
-    ):
+    if is_star_conditioned(feature_names) and (target_stars is None or difficulty_tier is None):
         raise InputError(
-            "Conformer-v4 requires --difficulty-tier or --target-stars for generation."
+            "Star-conditioned rhythm models require --difficulty-tier or --target-stars."
         )
     return difficulty_feature_array(row, feature_names)
 
@@ -146,13 +144,13 @@ def predict_modern_rhythm(
         )
     feature_names = tuple(config.get("difficulty_features", LEGACY_DIFFICULTY_FEATURES))
     requested_difficulty = resolve_standard_difficulty(difficulty_tier, target_stars)
-    if requested_difficulty is not None and feature_names != STAR_DIFFICULTY_FEATURES:
+    if requested_difficulty is not None and not is_star_conditioned(feature_names):
         raise InputError(
-            "Fixed star difficulty generation requires a Conformer-v4 star-conditioned model."
+            "Fixed star difficulty generation requires a star-conditioned Conformer model."
         )
-    if feature_names == STAR_DIFFICULTY_FEATURES and requested_difficulty is None:
+    if is_star_conditioned(feature_names) and requested_difficulty is None:
         raise InputError(
-            "Conformer-v4 requires --difficulty-tier or --target-stars for generation."
+            "The selected model requires --difficulty-tier or --target-stars for generation."
         )
     profile, selected_stars = (
         requested_difficulty if requested_difficulty is not None else (None, None)

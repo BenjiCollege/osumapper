@@ -15,6 +15,7 @@ from osumapper.difficulty import (
     LEGACY_DIFFICULTY_FEATURES,
     STANDARD_DIFFICULTY_KEYS,
     STAR_DIFFICULTY_FEATURES,
+    V5_DIFFICULTY_FEATURES,
 )
 from osumapper.errors import DependencyError, InputError
 from osumapper.training.config import DatasetPaths, GridConfig
@@ -68,18 +69,24 @@ def difficulty_feature_array(
     row: dict[str, Any],
     feature_names: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
 ) -> np.ndarray[Any, Any]:
-    if feature_names == STAR_DIFFICULTY_FEATURES:
+    if feature_names in {STAR_DIFFICULTY_FEATURES, V5_DIFFICULTY_FEATURES}:
         tier = str(row["difficulty_tier"])
         try:
             tier_index = STANDARD_DIFFICULTY_KEYS.index(tier)
         except ValueError as exc:
             raise InputError(f"Unknown standard difficulty tier in dataset: {tier}") from exc
-        return np.asarray(
-            [
-                float(row["star_rating"]) / 10.0,
-                tier_index / max(1, len(STANDARD_DIFFICULTY_KEYS) - 1),
-            ],
-            dtype=np.float32,
+        if feature_names == STAR_DIFFICULTY_FEATURES:
+            return np.asarray(
+                [
+                    float(row["star_rating"]) / 10.0,
+                    tier_index / max(1, len(STANDARD_DIFFICULTY_KEYS) - 1),
+                ],
+                dtype=np.float32,
+            )
+        tier_one_hot = np.zeros(len(STANDARD_DIFFICULTY_KEYS), dtype=np.float32)
+        tier_one_hot[tier_index] = 1.0
+        return np.concatenate(
+            (np.asarray([float(row["star_rating"]) / 10.0], dtype=np.float32), tier_one_hot)
         )
     if feature_names == LEGACY_DIFFICULTY_FEATURES:
         return np.asarray(
@@ -530,6 +537,16 @@ def make_tf_dataset(
             tf.TensorSpec((config.sequence_length,), tf.float32),
         )
         dataset = tf.data.Dataset.from_generator(generator, output_signature=signature)
+    if difficulty_features == V5_DIFFICULTY_FEATURES:
+        # V5 gives the two highest tiers more influence without duplicating
+        # windows or allowing one prolific mapset to dominate the split.
+        tier_emphasis = tf.constant([1.0, 1.0, 1.0, 1.1, 1.5, 2.0], dtype=tf.float32)
+
+        def emphasize_expert_tiers(inputs: Any, labels: Any, mask: Any) -> Any:
+            factor = tf.reduce_sum(tf.cast(inputs["difficulty"][1:], tf.float32) * tier_emphasis)
+            return inputs, labels, tf.cast(mask, tf.float32) * factor
+
+        dataset = dataset.map(emphasize_expert_tiers, num_parallel_calls=tf.data.AUTOTUNE)
     options = tf.data.Options()
     options.experimental_deterministic = True
     dataset = dataset.with_options(options)

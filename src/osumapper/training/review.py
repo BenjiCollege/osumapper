@@ -4,7 +4,7 @@ import random
 from pathlib import Path
 from typing import Any
 
-from osumapper.difficulty import STAR_DIFFICULTY_FEATURES
+from osumapper.difficulty import is_star_conditioned
 from osumapper.errors import InputError
 from osumapper.package import safe_filename
 from osumapper.pipeline import GenerationRequest, generate_package
@@ -69,7 +69,7 @@ def generate_review_packages(
     if config is None:
         raise InputError(f"Modern model configuration is missing under {root}.")
     chosen_threshold = prediction_threshold(config, threshold)
-    star_conditioned = tuple(config.get("difficulty_features", ())) == STAR_DIFFICULTY_FEATURES
+    star_conditioned = is_star_conditioned(tuple(config.get("difficulty_features", ())))
     destination = (output or (Path.cwd() / "output" / "held-out-review")).expanduser().resolve()
     destination.mkdir(parents=True, exist_ok=True)
     rows = select_review_maps(dataset_root=dataset_root, model_root=root, count=count, seed=seed)
@@ -91,6 +91,10 @@ def generate_review_packages(
                 rhythm_threshold=chosen_threshold,
                 difficulty_tier=str(row["difficulty_tier"]) if star_conditioned else None,
                 target_stars=float(row["star_rating"]) if star_conditioned else None,
+                # Human-review drafts must preserve measurable model misses
+                # instead of silently dropping the hardest examples. Normal
+                # generation and full-set export keep their strict star gates.
+                enforce_star_target=False,
                 open_in_lazer=open_in_lazer,
             ),
             progress=lambda message, number=index: progress(f"[{number}] {message}"),
@@ -113,6 +117,7 @@ def generate_review_packages(
         "seed": seed,
         "threshold": chosen_threshold,
         "model": str(root / "model.keras"),
+        "star_target_policy": "measured_review_draft_not_strict_export",
         "packages": generated,
     }
     manifest = destination / "review_manifest.json"
