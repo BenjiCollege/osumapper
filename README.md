@@ -22,7 +22,8 @@ quality emphasis on Expert and Expert+. The current **FullSet-v1** implementatio
 establishes the six-map packaging and validation boundary using Conformer-v4.
 Conformer-v5 added one shared music encoder with six tier-specific rhythm heads,
 and Conformer-v6 constrains those heads to be monotonically nested. Placement-v2
-adds difficulty-conditioned, position-anchored learned placement. One-pass
+adds difficulty-conditioned, position-anchored learned placement, superseded by
+Placement-v3. One-pass
 full-set inference, auxiliary section heads, and hitsound planning remain research
 milestones. See [`ROADMAP.md`](ROADMAP.md) for the phased quality plan and release
 gates.
@@ -56,7 +57,7 @@ baseline and compatibility policy.
 - Mixed-precision RTX training, optional XLA, float16 window shards, per-song
   balancing, AdamW, learning-rate reduction, and early stopping.
 - A Placement-v1 learner for flow, object types, slider lengths, and combo
-  changes, superseded by difficulty-conditioned Placement-v2 with absolute
+  changes, superseded by difficulty-conditioned Placement-v2/v3 with absolute
   position anchoring, slider repeats, and hold length, plus a standalone
   placement/playability analyzer.
 - An osu!standard ranking-criteria audit that reports objective rules,
@@ -222,7 +223,7 @@ Hard favor readability, near-stacks, and more sliders. Expert and Expert+ permit
 larger movement, tighter streams, and sparse exact stacks. The planner never adds
 rhythm timestamps: timing precision remains the responsibility of Conformer-v4,
 and star calibration plus the criteria audit still gate export. This is a bounded
-heuristic placement system and remains the default; the learned Placement-v2
+heuristic placement system and remains the default; the learned Placement-v3
 alternative is selected with `--flow-engine placement`. Every map still requires
 listening, test play, and human editing.
 
@@ -306,8 +307,8 @@ the complete `rhythm-conformer-v5-curated-run1-seed-2026` until that folder hold
 both `model.keras` and `config.json`. It also defaults to deterministic
 PatternPlanner, complete six-difficulty generation, the installed-lazer star
 calculator, seed 2026, and ±0.03★ precision. Learned placement remains optional
-and follows the same rule: `placement-v2` is selected once trained, otherwise
-`placement-v1`, and choosing it requires a real `model.keras` plus `config.json`.
+and follows the same rule: `placement-v3` is selected once trained, otherwise
+`placement-v2`, and choosing it requires a real `model.keras` plus `config.json`.
 
 **Import completed packages into osu!lazer** is deliberately disabled by default.
 Importing a local package must not be treated as a filename- or title-based
@@ -320,7 +321,7 @@ not passed to generation.
 
 The **Training lab** tab provides safe `.osz` ingestion, explicit GOOD-map
 curation, scan/statistics/split/feature/window controls, Conformer-v6 and
-Placement-v2 GPU training, calibration, held-out evaluation, review packages,
+Placement-v3 GPU training, calibration, held-out evaluation, review packages,
 and placement analysis. Both sides scroll independently on smaller screens. The
 **Activity** tab keeps detailed process output and actionable errors.
 
@@ -1042,7 +1043,7 @@ changes the decision threshold rather than probability ranking.
 Five deterministic review packages from this baseline are available locally at
 `output/held-out-review-transformer-v1/` with their exact source-map manifest.
 
-### 5. Train Placement-v2 and analyze flow
+### 5. Train Placement-v3 and analyze flow
 
 Rhythm decides *when* objects occur; placement decides *where* and *what*. It is
 kept as a separate model so a rhythm architecture can be evaluated before
@@ -1054,8 +1055,14 @@ not see which difficulty it was writing for, had no notion of absolute playfield
 position, and its predictions ignored the spacing scale that star calibration
 tunes.
 
-**Placement-v2** is the current architecture and keeps every V1 signal while
-adding:
+Its loss also combined a per-step term with `keras.losses.binary_crossentropy`,
+which reduces the last axis. That collapsed the combo channel from
+`(batch, step)` to `(batch,)`, so every real Placement-v1 run aborted during its
+first epoch; only a batch-of-one smoke test, where the shapes coincidentally
+broadcast, hid it. The term is now computed element-wise, and a regression test
+trains both architectures at batch 2 with a different sequence length.
+
+**Placement-v2** keeps every V1 signal while adding:
 
 - **difficulty conditioning** — the requested target star rating plus the same
   six one-hot tier features Conformer-v5/v6 use, so one model writes Easy and
@@ -1077,13 +1084,46 @@ adding:
   not swamped by circles; a positive-weighted combo loss; and a unit-norm
   regulariser that keeps the turn head on the circle.
 
+**Placement-v3** is the current architecture. It shares V2's encoder, features,
+and targets, and changes only what the measured V1/V2 comparison indicted. On 66
+held-out test songs, all three trained on the same frozen split with the same
+schedule and seed:
+
+| metric | v1 | v2 | v3 |
+|---|---:|---:|---:|
+| jump distance MAE | 50.85 px | 53.84 px | **48.09 px** |
+| turn angle MAE | 64.12° | 61.46° | **61.35°** |
+| slider length MAE | 29.00 px | 28.12 px | **27.45 px** |
+| object type accuracy | 0.9133 | 0.9123 | **0.9135** |
+| new combo accuracy | 0.7878 | 0.8350 | **0.8439** |
+| spinner recall | 0.2664 | **0.7828** | 0.7541 |
+| slider recall | 0.9138 | **0.9280** | 0.9228 |
+| circle recall | **0.9151** | 0.9032 | 0.9083 |
+
+V2 won object types, combos, turn angle, and slider length, but lost jump
+distance — the quantity star calibration tunes. A trivial "predict the training
+mean" baseline scores 76.9 px, so both models learn real structure, yet V2's
+prediction spread fell to 67.9 px against a 93.4 px target spread while V1 held
+72.6 px. A Huber delta of 0.05 is 32 px, so typical ~54 px distance errors sat in
+the linear regime where the gradient stops growing and the head hedged toward the
+mean. V3 therefore uses squared error on distance alone at weight 3.0, and demotes
+the absolute-position term from 0.75 to 0.25 with a reconstruction anchor of 0.15,
+because that head only reached ~99 px MAE. Slider length measurably improved under
+Huber, so those terms keep it. V3's spread recovered to 71.2 px and its
+correlation with human spacing rose to 0.717, above both predecessors.
+
+Note what MAE cannot see: it rewards predicting the average, and averaged spacing
+reads as bland even when it scores well. Predicting a spacing distribution and
+sampling from it would score worse on MAE while plausibly producing better maps,
+and needs a different acceptance metric before it can be judged.
+
 Train it on the RTX 4070 after the rated-only split is stable:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
   --data-root "$HOME/osumapper/training_data" \
-  --output "$HOME/osumapper/models/modern/placement-v2-rated-seed-2026" \
-  --architecture placement-v2 \
+  --output "$HOME/osumapper/models/modern/placement-v3-rated-seed-2026" \
+  --architecture placement-v3 \
   --model-dimension 192 --blocks 5 --attention-heads 6 --dropout 0.15 \
   --epochs 75 \
   --batch-size 32 \
@@ -1097,6 +1137,7 @@ CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
   --seed 2026
 ```
 
+`--architecture placement-v1|placement-v2|placement-v3` selects the objective;
 `--model-dimension` must divide evenly by `--attention-heads`. Raising the width
 and block count increases capacity and VRAM use; keep the frozen split and start
 a separately named run whenever either changes, because `--resume` deliberately
@@ -1109,7 +1150,7 @@ test songs:
 ```bash
 uv run --extra gpu osumapper train evaluate placement \
   --data-root "$HOME/osumapper/training_data" \
-  --model "$HOME/osumapper/models/modern/placement-v2-rated-seed-2026"
+  --model "$HOME/osumapper/models/modern/placement-v3-rated-seed-2026"
 ```
 
 Placement inference constrains generated objects and slider endpoints to the
@@ -1135,8 +1176,8 @@ measure obvious flow/playability problems; they are not proof of map quality.
 Preserve and evaluate the completed V4 benchmark first. Curate GOOD-only maps,
 then train Conformer-v6 with its shared multi-scale encoder, six monotonically
 nested tier heads, Expert and Expert+ capacity, hard-negative focal training, and
-per-tier calibration. Train Placement-v2 on the same frozen split once rhythm
-wins, and compare it against both Placement-v1 and PatternPlanner-v1 on held-out
+per-tier calibration. Train Placement-v3 on the same frozen split once rhythm
+wins, and compare it against its predecessors and PatternPlanner-v1 on held-out
 songs before making it the generation default. Optional frozen MERT features are
 an ablation only after those controlled baselines are stable. The complete
 sequence and acceptance targets are maintained in [`ROADMAP.md`](ROADMAP.md).
@@ -1171,13 +1212,13 @@ uv run --extra gpu osumapper generate song.osz \
   --rhythm-engine modern \
   --modern-model "$HOME/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026" \
   --flow-engine placement \
-  --placement-model "$HOME/osumapper/models/modern/placement-v2-rated-seed-2026" \
+  --placement-model "$HOME/osumapper/models/modern/placement-v3-rated-seed-2026" \
   --difficulty-tier expert \
   --seed 2026 \
   --open
 ```
 
-Placement-v2 receives the requested tier, the target star rating, and the spacing
+The learned placement model receives the requested tier, the target star rating, and the spacing
 scale chosen by star calibration, so `--flow-engine placement` participates in
 single-tier and `--full-set` calibration exactly like PatternPlanner-v1 does.
 
@@ -1326,6 +1367,7 @@ models/modern/rhythm-conformer-v3/  Faster isolated Conformer-v3 output
 models/modern/rhythm-conformer-v4-standard-stars/  Standard star-conditioned V4 output
 models/modern/placement-v1/         Original learned flow/object-type output
 models/modern/placement-v2/         Difficulty-conditioned placement output
+models/modern/placement-v3/         Current placement output
 training_data/           Ignored metadata, imports, splits, features, and window shards
 tests/                   Fixtures, golden outputs, and regression tests
 legacy/                  Preservation and compatibility documentation

@@ -106,10 +106,50 @@ traversal fits before the next object. A five-block Conformer encoder replaces t
 three plain attention blocks, and the objective is rebalanced with Huber terms,
 class-weighted object types, and a positive-weighted combo loss.
 
+### Measured result, 66 held-out test songs, seed 2026
+
+All three placement architectures were trained on the same frozen split with the
+same schedule and seed, so the differences are attributable to architecture and
+objective only.
+
+| metric | v1 | v2 | v3 |
+|---|---:|---:|---:|
+| jump distance MAE | 50.85 px | 53.84 px | **48.09 px** |
+| spacing correlation | 0.677 | 0.652 | **0.717** |
+| prediction spread (target 93.4 px) | 72.6 px | 67.9 px | 71.2 px |
+| spinner recall | 0.2664 | **0.7828** | 0.7541 |
+| new combo accuracy | 0.7878 | 0.8350 | **0.8439** |
+
+Placement-v1 could never train before this work: a loss term reduced the step
+axis, so every run aborted in its first epoch. V2 then beat the repaired V1 on
+object types, combos, turn angle, and slider length, but regressed jump distance
+and shrank its prediction spread, because a Huber delta of 0.05 is 32px while
+typical distance errors were ~54px. V3 restores squared error on distance only,
+demotes the weak absolute-position term, and now leads on jump distance, turn
+angle, slider length, object type, and combo accuracy.
+
 Long-range pattern continuation, learned overlap and anchor structure, and
-non-linear slider geometry are still open. Placement-v2 advances only by beating
-Placement-v1 and PatternPlanner-v1 on the frozen test split and in human review;
-the version number alone is not evidence.
+non-linear slider geometry are still open. A promoted placement model must beat
+its predecessors and PatternPlanner-v1 on the frozen test split **and** in human
+review; the version number alone is not evidence, and no human A/B review has
+been run yet.
+
+### Known quality gaps in generated full sets
+
+The first V6 + Placement-v3 six-difficulty package hit every star target (mean
+error 0.0145★, maximum 0.0285★) while still failing to look human-authored:
+
+- Mid tiers are slider-dominated (Insane came out 85% sliders), so tier
+  conditioning reaches the distance head far more effectively than the type head.
+- Expert+ made 96% of its transitions jumps over 160px with zero stacks, because
+  star calibration buys difficulty with spacing inflation rather than musical
+  structure.
+- Sub-tick snapping errors concentrate in sparse tiers (83/208 Easy objects,
+  150/327 Normal), which alone would fail visual review.
+
+These are ranked ahead of further architecture work: snapping first, then
+constraining spacing-only calibration, then per-tier object-type priors, then
+curating GOOD-rated training data instead of the current unrated split.
 
 ## Phase 5 — Complete arrangement and polish
 

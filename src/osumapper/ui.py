@@ -49,8 +49,8 @@ SUCCESS = "#42c89a"
 ERROR = "#ff6b7a"
 DEFAULT_RHYTHM_MODEL = "rhythm-conformer-v5-curated-run1-seed-2026"
 DEFAULT_V6_TRAINING_MODEL = "rhythm-conformer-v6-curated-657-songs-seed-2026"
-DEFAULT_PLACEMENT_MODEL = "placement-v2"
-LEGACY_PLACEMENT_MODEL = "placement-v1"
+DEFAULT_PLACEMENT_MODEL = "placement-v3"
+LEGACY_PLACEMENT_MODEL = "placement-v2"
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,11 +131,11 @@ def default_generation_models(root: Path) -> tuple[Path, Path]:
     if configured_placement:
         placement = Path(configured_placement).expanduser()
     else:
-        trained_v2 = modern_root / DEFAULT_PLACEMENT_MODEL
-        v2_model, v2_config = model_bundle_paths(trained_v2)
+        trained = modern_root / DEFAULT_PLACEMENT_MODEL
+        model_file, config_file = model_bundle_paths(trained)
         placement = (
-            trained_v2
-            if v2_model.is_file() and v2_config.is_file()
+            trained
+            if model_file.is_file() and config_file.is_file()
             else modern_root / LEGACY_PLACEMENT_MODEL
         )
     return rhythm, placement
@@ -790,9 +790,9 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Placement-v2 conditions flow on the requested tier and target stars, anchors "
-                "absolute playfield position, and predicts slider repeats and hold length. "
-                "Train it into its own folder; Placement-v1 stays readable for comparison."
+                "Placement-v3 keeps v2's tier conditioning, position anchoring, repeats, and hold "
+                "length, but restores squared error on jump distance so the model commits to "
+                "real spacing instead of averaging. Train each into its own folder."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -801,7 +801,7 @@ class OsumapperStudio:
             model,
             "Placement model",
             self.placement_architecture,
-            ("placement-v2", "placement-v1"),
+            ("placement-v3", "placement-v2", "placement-v1"),
         )
         self._entry_row(model, "Placement output", self.placement_output)
         ttk.Button(
@@ -819,7 +819,7 @@ class OsumapperStudio:
     def _sync_placement_output(self, *_args: object) -> None:
         """Keep each placement architecture in its own folder by default."""
         current = Path(self.placement_output.get().strip() or ".")
-        if current.name in {"placement-v1", "placement-v2"}:
+        if current.name in {"placement-v1", "placement-v2", "placement-v3"}:
             self.placement_output.set(str(current.with_name(self.placement_architecture.get())))
 
     def _sync_target_stars(self, *_args: object) -> None:
@@ -1073,7 +1073,7 @@ class OsumapperStudio:
             if not placement_file.is_file() or not placement_config.is_file():
                 raise ValueError(
                     f"No trained placement model exists under {placement_model}. "
-                    "Keep Flow set to deterministic or train Placement-v2 first."
+                    "Keep Flow set to deterministic or train Placement-v3 first."
                 )
         return GenerationOptions(
             preset=self.preset.get(),

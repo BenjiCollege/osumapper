@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import hashlib
 import math
 from dataclasses import asdict, dataclass
 from functools import lru_cache
@@ -25,8 +26,12 @@ from osumapper.training.splits import load_split
 from osumapper.training.storage import read_json, write_json
 from osumapper.training.trainer import _configure_device, _jit_compile, _safe_output
 
-PLACEMENT_ARCHITECTURES = ("placement-v1", "placement-v2")
-DEFAULT_PLACEMENT_ARCHITECTURE = "placement-v2"
+PLACEMENT_ARCHITECTURES = ("placement-v1", "placement-v2", "placement-v3")
+DEFAULT_PLACEMENT_ARCHITECTURE = "placement-v3"
+# v2 and v3 share an encoder, feature set, and target set; they differ only in how
+# the loss is balanced and how far reconstruction trusts the position head.
+_V2_FAMILY = {"placement-v2", "placement-v3"}
+_MODEL_VERSIONS = {"placement-v1": 1, "placement-v2": 2, "placement-v3": 3}
 
 PLACEMENT_FEATURE_DIMENSION = 11
 PLACEMENT_TARGET_DIMENSION = 8
@@ -47,6 +52,9 @@ PLAYFIELD_HEIGHT = 384.0
 # removes the slow drift a purely relative walk accumulates over a long map
 # without weakening the spacing control that star calibration tunes.
 _ABSOLUTE_ANCHOR_WEIGHT = 0.3
+# The position head only reached ~99px MAE on held-out songs, so v3 leans on it
+# less: it is useful for stopping long-run drift, not for dictating each step.
+_ANCHOR_WEIGHTS = {"placement-v2": 0.3, "placement-v3": 0.15}
 _MINIMUM_JUMP_PX = 12.0
 _MAXIMUM_JUMP_PX = 420.0
 
@@ -82,7 +90,7 @@ def _normalize_architecture(architecture: str) -> str:
 def feature_dimension(architecture: str) -> int:
     return (
         PLACEMENT_V2_FEATURE_DIMENSION
-        if _normalize_architecture(architecture) == "placement-v2"
+        if _normalize_architecture(architecture) in _V2_FAMILY
         else PLACEMENT_FEATURE_DIMENSION
     )
 
@@ -90,7 +98,7 @@ def feature_dimension(architecture: str) -> int:
 def target_dimension(architecture: str) -> int:
     return (
         PLACEMENT_V2_TARGET_DIMENSION
-        if _normalize_architecture(architecture) == "placement-v2"
+        if _normalize_architecture(architecture) in _V2_FAMILY
         else PLACEMENT_TARGET_DIMENSION
     )
 
@@ -314,7 +322,7 @@ def _map_arrays(
     divisors = [_snap_divisor(obj.get("beat_snap")) for obj in objects]
     active = [_active_point(timestamp, red_points) for timestamp in timestamps]
     bpms = [float(point.get("bpm") or 120.0) for point in active]
-    if architecture == "placement-v2":
+    if architecture in _V2_FAMILY:
         meters = [int(point.get("meter") or 4) for point in active]
         beat_lengths = [float(point.get("beat_length_ms") or 500.0) for point in active]
         features = _v2_features(
@@ -384,7 +392,7 @@ def prepare_placement_dataset(
             feature_window[:valid] = features[start:stop]
             target_window[:valid] = targets[start:stop]
             weight_window[:valid] = song_weight
-            if selected == "placement-v2":
+            if selected in _V2_FAMILY:
                 _apply_window_positions(feature_window, sequence_length)
             all_features.append(feature_window)
             all_targets.append(target_window)
@@ -421,13 +429,22 @@ def _placement_loss(keras: Any) -> Any:
                 axis=-1,
             )
             slider = ops.square(y_true[..., 6] - y_pred[..., 6]) * y_true[..., 4]
-            combo = keras.losses.binary_crossentropy(y_true[..., 7], y_pred[..., 7])
+            # `keras.losses.binary_crossentropy` reduces the last axis, so passing
+            # the already-squeezed (batch, step) combo channel collapsed it to
+            # (batch,) and every Placement-v1 run died on a broadcast error before
+            # finishing one epoch. Compute the element-wise term directly so the
+            # loss keeps one value per step, as the other terms do.
+            probability = ops.clip(y_pred[..., 7], 1e-7, 1.0 - 1e-7)
+            combo = -(
+                y_true[..., 7] * ops.log(probability)
+                + (1.0 - y_true[..., 7]) * ops.log(1.0 - probability)
+            )
             return 2.0 * distance + turn + kind + slider + 0.25 * combo
 
     return PlacementLoss(name="placement_loss")
 
 
-def _placement_v2_loss(keras: Any) -> Any:
+def _placement_v2_loss(keras: Any, **overrides: Any) -> Any:
     @keras.saving.register_keras_serializable(package="osumapper")
     class PlacementV2Loss(keras.losses.Loss):
         """Balance the eight Placement-v2 predictions against their real scales.
@@ -450,10 +467,12 @@ def _placement_v2_loss(keras: Any) -> Any:
             position_weight: float = 0.75,
             combo_positive_weight: float = 3.0,
             kind_class_weights: tuple[float, float, float] = (1.0, 1.25, 6.0),
+            squared_distance: bool = False,
             name: str = "placement_v2_loss",
             **kwargs: Any,
         ) -> None:
             super().__init__(name=name, **kwargs)
+            self.squared_distance = bool(squared_distance)
             self.distance_weight = float(distance_weight)
             self.turn_weight = float(turn_weight)
             self.kind_weight = float(kind_weight)
@@ -477,7 +496,12 @@ def _placement_v2_loss(keras: Any) -> Any:
         def call(self, y_true: Any, y_pred: Any) -> Any:
             ops = keras.ops
             actual = ops.cast(y_true, y_pred.dtype)
-            distance = self._huber(ops, actual[..., 0] - y_pred[..., 0], 0.05)
+            distance_error = actual[..., 0] - y_pred[..., 0]
+            distance = (
+                ops.square(distance_error)
+                if self.squared_distance
+                else self._huber(ops, distance_error, 0.05)
+            )
 
             true_turn = actual[..., 1:3]
             predicted_turn = y_pred[..., 1:3]
@@ -535,17 +559,44 @@ def _placement_v2_loss(keras: Any) -> Any:
                 "position_weight": self.position_weight,
                 "combo_positive_weight": self.combo_positive_weight,
                 "kind_class_weights": list(self.kind_class_weights),
+                "squared_distance": self.squared_distance,
             }
 
-    return PlacementV2Loss()
+    return PlacementV2Loss(**overrides)
+
+
+def _placement_v3_loss(keras: Any) -> Any:
+    """Placement-v2's objective with the two terms that measurably hurt it fixed.
+
+    Measured against Placement-v1 on the held-out split, v2 won on object types,
+    combos, turn angle, and slider length but lost jump-distance accuracy
+    (50.8px -> 53.8px MAE) while shrinking its prediction spread (72.7px ->
+    67.9px against a 93.4px target spread). Both symptoms point at the same
+    cause: a Huber delta of 0.05 is 32px, so typical ~54px distance errors sat in
+    the linear regime where the gradient no longer grows with the error, and the
+    head hedged toward the mean. v3 restores squared error on distance so large
+    misses are punished proportionally again, and demotes the absolute-position
+    term, which only reached ~99px MAE and was competing for the same capacity.
+    Every term v2 actually improved is carried over unchanged.
+    """
+
+    # Only the distance term changes shape. Slider length measurably improved
+    # under Huber (29.0px -> 28.1px), so those terms keep it.
+    return _placement_v2_loss(
+        keras,
+        squared_distance=True,
+        distance_weight=3.0,
+        position_weight=0.25,
+        name="placement_v3_loss",
+    )
 
 
 def _loss_for(keras: Any, architecture: str) -> Any:
-    return (
-        _placement_v2_loss(keras)
-        if architecture == "placement-v2"
-        else _placement_loss(keras)
-    )
+    if architecture == "placement-v3":
+        return _placement_v3_loss(keras)
+    if architecture == "placement-v2":
+        return _placement_v2_loss(keras)
+    return _placement_loss(keras)
 
 
 def _build_placement_v1(
@@ -726,7 +777,7 @@ def build_placement_model(
     selected = _normalize_architecture(architecture)
     if sequence_length <= 0:
         raise InputError("Placement sequence length must be positive.")
-    if selected == "placement-v2":
+    if selected in _V2_FAMILY:
         if model_dimension <= 0 or blocks <= 0 or attention_heads <= 0:
             raise InputError("Placement dimension, blocks, and heads must be positive.")
         if not 0.0 <= dropout < 1.0:
@@ -904,7 +955,7 @@ def train_placement(
     write_json(
         output_root / "config.json",
         {
-            "model_version": 2 if architecture == "placement-v2" else 1,
+            "model_version": _MODEL_VERSIONS[architecture],
             "model_kind": architecture,
             "architecture": architecture,
             "feature_dimension": feature_dimension(architecture),
@@ -1062,6 +1113,54 @@ def _cached_placement_model(path: str) -> Any:
     return _require_keras().models.load_model(Path(path), compile=False)
 
 
+_PREDICTION_CACHE_LIMIT = 32
+_prediction_cache: dict[tuple[Any, ...], np.ndarray[Any, Any]] = {}
+
+
+def _prediction_cache_key(
+    model_path: str,
+    features: np.ndarray[Any, Any],
+    sequence_length: int,
+) -> tuple[Any, ...]:
+    return (
+        model_path,
+        sequence_length,
+        features.shape,
+        hashlib.sha256(np.ascontiguousarray(features, dtype=np.float32)).hexdigest(),
+    )
+
+
+def _cached_predictions(
+    model: Any,
+    model_path: str,
+    features: np.ndarray[Any, Any],
+    sequence_length: int,
+    dimension: int,
+    *,
+    stamp_positions: bool,
+) -> np.ndarray[Any, Any]:
+    """Reuse predictions across calibration attempts that only change spacing.
+
+    Full-set calibration re-runs placement up to 24 times per tier while tuning
+    the flow scale, but the flow scale is applied during reconstruction and never
+    reaches the model input. Only a density, tier, or threshold change alters the
+    features, so keying the cache on the feature array itself is both correct and
+    enough to make the fine-spacing phase nearly free.
+    """
+
+    key = _prediction_cache_key(model_path, features, sequence_length)
+    cached = _prediction_cache.get(key)
+    if cached is not None:
+        return cached
+    predicted = _predict_windows(
+        model, features, sequence_length, dimension, stamp_positions=stamp_positions
+    )
+    if len(_prediction_cache) >= _PREDICTION_CACHE_LIMIT:
+        _prediction_cache.pop(next(iter(_prediction_cache)))
+    _prediction_cache[key] = predicted
+    return predicted
+
+
 def _predict_windows(
     model: Any,
     features: np.ndarray[Any, Any],
@@ -1201,6 +1300,7 @@ def _reconstruct_v2(
     margin: float,
     flow_scale: float,
     seed: int,
+    anchor_weight: float = _ABSOLUTE_ANCHOR_WEIGHT,
 ) -> list[dict[str, Any]]:
     """Turn Placement-v2 predictions into legal, spacing-accurate osu! objects.
 
@@ -1236,12 +1336,8 @@ def _reconstruct_v2(
             step_y = math.sin(phase) * distance
             anchor_x = min(right, max(left, float(values[8]) * PLAYFIELD_WIDTH))
             anchor_y = min(bottom, max(top, float(values[9]) * PLAYFIELD_HEIGHT))
-            blend_x = (1.0 - _ABSOLUTE_ANCHOR_WEIGHT) * (previous_x + step_x) + (
-                _ABSOLUTE_ANCHOR_WEIGHT * anchor_x
-            )
-            blend_y = (1.0 - _ABSOLUTE_ANCHOR_WEIGHT) * (previous_y + step_y) + (
-                _ABSOLUTE_ANCHOR_WEIGHT * anchor_y
-            )
+            blend_x = (1.0 - anchor_weight) * (previous_x + step_x) + anchor_weight * anchor_x
+            blend_y = (1.0 - anchor_weight) * (previous_y + step_y) + anchor_weight * anchor_y
             direction_x = blend_x - previous_x
             direction_y = blend_y - previous_y
             if math.hypot(direction_x, direction_y) < 1e-6:
@@ -1332,7 +1428,7 @@ def predict_placement(
     if not times:
         raise InputError("Placement received no rhythm events.")
     model = _cached_placement_model(str(model_path))
-    if architecture == "placement-v2":
+    if architecture in _V2_FAMILY:
         features, beat_lengths, slider_lengths = _v2_inference_features(
             document,
             times,
@@ -1340,8 +1436,9 @@ def predict_placement(
             difficulty_tier=difficulty_tier,
             target_stars=target_stars,
         )
-        predicted = _predict_windows(
+        predicted = _cached_predictions(
             model,
+            str(model_path),
             features,
             sequence_length,
             PLACEMENT_V2_FEATURE_DIMENSION,
@@ -1355,10 +1452,12 @@ def predict_placement(
             margin=_playfield_margin(document),
             flow_scale=flow_scale,
             seed=seed,
+            anchor_weight=_ANCHOR_WEIGHTS.get(architecture, _ABSOLUTE_ANCHOR_WEIGHT),
         )
     features = _inference_features(document, timestamps, target_density)
-    predicted = _predict_windows(
+    predicted = _cached_predictions(
         model,
+        str(model_path),
         features,
         sequence_length,
         PLACEMENT_FEATURE_DIMENSION,
@@ -1450,7 +1549,7 @@ def evaluate_placement(
     estimate_kind = np.argmax(estimate[:, 3:6], axis=1)
     slider_mask = actual_kind == 1
     report: dict[str, Any] = {
-        "version": 2 if architecture == "placement-v2" else 1,
+        "version": _MODEL_VERSIONS[architecture],
         "architecture": architecture,
         "split": "test",
         "model": str(model_path),
@@ -1472,7 +1571,7 @@ def evaluate_placement(
         report[f"{name}_recall"] = (
             float(np.mean(estimate_kind[mask] == index)) if mask.any() else None
         )
-    if architecture == "placement-v2":
+    if architecture in _V2_FAMILY:
         report.update(
             {
                 "position_mae_px": float(

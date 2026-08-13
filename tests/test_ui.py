@@ -20,7 +20,7 @@ from osumapper.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
-    def test_untrained_v6_and_placement_v2_fall_back_to_the_previous_models(self) -> None:
+    def test_untrained_defaults_fall_back_to_the_previous_models(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             rhythm, placement = default_generation_models(Path("/home/test/osumapper"))
 
@@ -30,7 +30,7 @@ class UiHelperTests(unittest.TestCase):
         )
         self.assertEqual(
             placement,
-            Path("/home/test/osumapper/models/modern/placement-v1"),
+            Path("/home/test/osumapper/models/modern/placement-v2"),
         )
 
     def test_model_bundle_accepts_folder_or_keras_file(self) -> None:
@@ -65,17 +65,17 @@ class UiHelperTests(unittest.TestCase):
 
         self.assertEqual(rhythm, v6)
 
-    def test_trained_placement_v2_supersedes_placement_v1(self) -> None:
+    def test_trained_placement_v3_supersedes_the_previous_placement_model(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
-            placement_v2 = root / "models" / "modern" / "placement-v2"
-            placement_v2.mkdir(parents=True)
-            (placement_v2 / "model.keras").touch()
-            (placement_v2 / "config.json").write_text("{}", encoding="utf-8")
+            placement_v3 = root / "models" / "modern" / "placement-v3"
+            placement_v3.mkdir(parents=True)
+            (placement_v3 / "model.keras").touch()
+            (placement_v3 / "config.json").write_text("{}", encoding="utf-8")
             with patch.dict(os.environ, {}, clear=True):
                 _rhythm, placement = default_generation_models(root)
 
-        self.assertEqual(placement, placement_v2)
+        self.assertEqual(placement, placement_v3)
 
     def test_star_calibration_failure_is_summarized_for_queue_row(self) -> None:
         summary = summarize_process_error(

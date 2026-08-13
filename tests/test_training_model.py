@@ -14,6 +14,7 @@ from osumapper.config import GameMode, GenerationConfig
 from osumapper.engine import generate_document
 from osumapper.errors import InputError
 from osumapper.presets import get_preset
+from osumapper.training import placement_learning
 from osumapper.training.analysis import analyze_map
 from osumapper.training.benchmark import build_dataset_benchmark
 from osumapper.training.calibration import calibrate_threshold
@@ -253,6 +254,40 @@ class TrainingModelTests(unittest.TestCase):
             self.assertEqual(report["quality_score"], 100)
             self.assertTrue(Path(report["output"]).is_file())
 
+    def test_placement_losses_keep_one_value_per_step(self) -> None:
+        # A loss term that reduces the step axis only broadcasts when the batch
+        # size happens to equal the sequence length, so real training died on the
+        # first epoch while a batch-of-one smoke test passed. Use batch 2 with a
+        # different sequence length: any term collapsing to (batch,) fails here.
+        for architecture, features, targets_dimension in (
+            ("placement-v1", 11, 8),
+            ("placement-v2", PLACEMENT_V2_FEATURE_DIMENSION, PLACEMENT_V2_TARGET_DIMENSION),
+            ("placement-v3", PLACEMENT_V2_FEATURE_DIMENSION, PLACEMENT_V2_TARGET_DIMENSION),
+        ):
+            with self.subTest(architecture=architecture):
+                model = build_placement_model(
+                    sequence_length=16,
+                    learning_rate=1e-3,
+                    jit_compile=False,
+                    architecture=architecture,
+                    model_dimension=24,
+                    blocks=1,
+                    attention_heads=4,
+                )
+                inputs = np.zeros((2, 16, features), dtype=np.float32)
+                inputs[:, :8, 6] = 0.2
+                inputs[:, :8, 11 if architecture == "placement-v2" else 6] = 1.0
+                targets = np.zeros((2, 16, targets_dimension), dtype=np.float32)
+                targets[:, :8, 2] = 1.0
+                targets[:, :8, 4] = 1.0
+                targets[:, :8, 7] = 1.0
+                weights = np.zeros((2, 16), dtype=np.float32)
+                weights[:, :8] = 1.0
+
+                loss = model.train_on_batch(inputs, targets, sample_weight=weights)
+
+                self.assertTrue(np.isfinite(loss))
+
     def test_placement_v1_builds_and_round_trips(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             model = build_placement_model(
@@ -342,6 +377,52 @@ class TrainingModelTests(unittest.TestCase):
             self.assertEqual(
                 [obj["time"] for obj in placed], [int(value) for value in timestamps]
             )
+
+    def test_placement_reuses_predictions_only_when_the_model_input_matches(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as name:
+            model = build_placement_model(
+                sequence_length=16,
+                learning_rate=1e-3,
+                jit_compile=False,
+                model_dimension=24,
+                blocks=1,
+                attention_heads=4,
+            )
+            destination = Path(name) / "placement.keras"
+            model.save(destination)
+            write_json(
+                Path(name) / "config.json",
+                {"architecture": "placement-v2", "training": {"sequence_length": 16}},
+            )
+            document = BeatmapDocument.read(FIXTURES / "standard.osu")
+            timestamps = np.asarray([500, 1_000, 1_500, 2_500])
+            common = {
+                "model_root": destination,
+                "seed": 2026,
+                "difficulty_tier": "expert",
+                "target_stars": 5.9,
+            }
+            placement_learning._prediction_cache.clear()
+            with patch.object(
+                placement_learning,
+                "_predict_windows",
+                wraps=placement_learning._predict_windows,
+            ) as spy:
+                predict_placement(document, timestamps, target_density=2.0, **common)
+                # Spacing is applied during reconstruction, so calibration's fine
+                # phase must not pay for inference again.
+                predict_placement(
+                    document, timestamps, target_density=2.0, flow_scale=2.0, **common
+                )
+                after_spacing_change = spy.call_count
+                # Density does reach the model input, so it must miss the cache.
+                predict_placement(document, timestamps, target_density=4.0, **common)
+                after_density_change = spy.call_count
+
+            self.assertEqual(after_spacing_change, 1)
+            self.assertEqual(after_density_change, 2)
 
     def test_placement_v2_spacing_follows_the_calibrated_flow_scale(self) -> None:
         # Full-set star calibration tunes spacing while the rhythm is locked, so a

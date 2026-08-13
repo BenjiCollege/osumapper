@@ -6,6 +6,7 @@ import json
 import platform
 import shutil
 import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -382,7 +383,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--model-dimension",
         type=int,
         default=192,
-        help="placement-v2 encoder width; must divide evenly by --attention-heads",
+        help="placement-v2/v3 encoder width; must divide evenly by --attention-heads",
     )
     train_placement_parser.add_argument("--blocks", type=int, default=5)
     train_placement_parser.add_argument("--attention-heads", type=int, default=6)
@@ -836,7 +837,24 @@ def _analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _use_utf8_output() -> None:
+    """Keep star ratings printable when the console is not UTF-8.
+
+    Progress and difficulty labels contain U+2605. On Windows a redirected or
+    piped stream defaults to the ANSI code page, where writing that character
+    raises UnicodeEncodeError and aborts an otherwise healthy generation run.
+    """
+
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        with suppress(OSError, ValueError):
+            reconfigure(encoding="utf-8", errors="replace")
+
+
 def main(argv: list[str] | None = None) -> int:
+    _use_utf8_output()
     parser = _build_parser()
     args = parser.parse_args(argv)
     try:

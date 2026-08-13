@@ -414,16 +414,18 @@ def _full_set_limitations(rhythm_architecture: str | None, placement_engine: str
             "independently and does not constrain cross-tier nesting; that requires "
             "conformer-v6."
         )
-    if placement_engine.startswith("placement-v2"):
-        limitations.append(
-            "Placement-v2 predicts flow, object types, slider geometry, repeats, and combos "
-            "from curated human maps, but hitsound planning and learned musical-section "
-            "planning are not trained."
-        )
-    elif placement_engine.startswith("placement-v1"):
+    if placement_engine == "placement-v1":
         limitations.append(
             "Placement-v1 predicts flow and object types without difficulty conditioning or "
-            "absolute-position anchoring; Placement-v2 supersedes it."
+            "absolute-position anchoring; later placement models supersede it."
+        )
+    elif placement_engine.startswith("placement-"):
+        # Any difficulty-conditioned placement model. Kept generic so a new
+        # version does not silently fall through to the PatternPlanner text.
+        limitations.append(
+            f"{placement_engine} predicts flow, object types, slider geometry, repeats, and "
+            "combos from human maps, but hitsound planning and learned musical-section "
+            "planning are not trained."
         )
     else:
         limitations.append(

@@ -172,7 +172,7 @@ def plan_standard_patterns(
 
     PatternPlanner-v1 is deliberately deterministic. It turns rhythm timestamps into
     circles, sliders, spinners, jumps, streams, bursts, and sparse controlled stacks.
-    It is a safe heuristic bridge to the future learned Placement-v2 model.
+    It remains the default; the learned placement models are opt-in alternatives.
     """
 
     timestamps = sorted({max(0, int(round(float(value)))) for value in timestamps_ms})

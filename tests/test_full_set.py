@@ -369,7 +369,7 @@ class FullSetTests(unittest.TestCase):
             placement_model = root / "placement-v2"
             placement_model.mkdir()
             (placement_model / "config.json").write_text(
-                json.dumps({"architecture": "placement-v2"}), encoding="utf-8"
+                json.dumps({"architecture": "placement-v3"}), encoding="utf-8"
             )
             output = root / "described.osz"
 
@@ -401,9 +401,12 @@ class FullSetTests(unittest.TestCase):
             self.assertEqual(set_report["rhythm_architecture"], "conformer-v6")
             self.assertTrue(set_report["difficulty_nesting_enforced"])
             self.assertFalse(set_report["one_pass_full_set_inference"])
-            self.assertEqual(set_report["placement_engine"], "placement-v2")
+            self.assertEqual(set_report["placement_engine"], "placement-v3")
             self.assertIn("monotonically nested", limitations)
-            self.assertIn("Placement-v2", limitations)
+            # A newer placement version must describe itself, never fall through
+            # to the deterministic PatternPlanner wording.
+            self.assertIn("placement-v3", limitations)
+            self.assertNotIn("PatternPlanner", limitations)
             self.assertNotIn("requires V5", limitations)
 
     def test_single_tier_generation_calibrates_before_export(self) -> None:
