@@ -10,6 +10,7 @@ from osumapper.ui import (
     GenerationOptions,
     build_generate_command,
     default_generation_models,
+    default_training_model,
     discover_inputs,
     model_bundle_paths,
     normalize_input_path,
@@ -40,6 +41,29 @@ class UiHelperTests(unittest.TestCase):
         self.assertEqual(folder_config, Path("/models/v5/config.json"))
         self.assertEqual(file_model, Path("/models/v5/model.keras"))
         self.assertEqual(file_config, Path("/models/v5/config.json"))
+
+    def test_v6_training_uses_a_new_output_folder(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            output = default_training_model(Path("/home/test/osumapper"))
+
+        self.assertEqual(
+            output,
+            Path(
+                "/home/test/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026"
+            ),
+        )
+
+    def test_completed_v6_becomes_the_generation_default(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            v6 = root / "models" / "modern" / "rhythm-conformer-v6-curated-657-songs-seed-2026"
+            v6.mkdir(parents=True)
+            (v6 / "model.keras").touch()
+            (v6 / "config.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                rhythm, _placement = default_generation_models(root)
+
+        self.assertEqual(rhythm, v6)
 
     def test_star_calibration_failure_is_summarized_for_queue_row(self) -> None:
         summary = summarize_process_error(

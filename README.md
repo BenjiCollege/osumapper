@@ -311,7 +311,7 @@ itself, so the individual Density, Output difficulty, and Target stars values ar
 not passed to generation.
 
 The **Training lab** tab provides safe `.osz` ingestion, explicit GOOD-map
-curation, scan/statistics/split/feature/window controls, Conformer-v3 and
+curation, scan/statistics/split/feature/window controls, Conformer-v6 and
 Placement-v1 GPU training, calibration, held-out evaluation, review packages,
 and placement analysis. Both sides scroll independently on smaller screens. The
 **Activity** tab keeps detailed process output and actionable errors.
@@ -528,6 +528,60 @@ default. Training output is stored under ignored local directories so it cannot
 replace the original models accidentally. A low training loss is not evidence of
 beatmap quality; use the held-out test-song evaluation and human review before
 drawing conclusions.
+
+### Conformer-v6: nested full-set training
+
+Conformer-v6 is a new isolated candidate; it does not overwrite the preserved
+V5 model. It adds a multi-scale audio stem, four shared Conformer blocks, six
+monotonically nested difficulty heads, monotonic star conditioning, and a
+hard-negative focal objective. The nested heads guarantee that a timestamp's
+predicted probability cannot decrease as the requested tier and target stars
+move from Easy toward Expert+. This supports coherent
+full-set rhythm selection, while the focal objective concentrates learning on
+confident false positives and missed musical events. These design changes still
+require validation and human A/B review; the V6 name alone is not evidence that
+it beats V5.
+
+The Studio's V6 output is deliberately separate:
+
+```text
+/home/bcolegio/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026
+```
+
+The previous V5 resume failed correctly because the dataset and split grew to
+657 songs after that run began. Do not use `--resume` with a changed split. Start
+the new V6 run against the current frozen split instead:
+
+```bash
+cd "$HOME/osumapper"
+set +H
+CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --output "$HOME/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026" \
+  --architecture conformer-v6 \
+  --epochs 50 --batch-size 32 --learning-rate 0.0005 \
+  --sequence-length 512 --audio-context-radius 0 \
+  --device gpu --precision mixed-float16 --xla auto \
+  --window-cache auto --early-stopping-patience 8 \
+  --weight-decay 0.0001 --seed 2026
+```
+
+After training, calibrate on validation and evaluate the untouched test split:
+
+```bash
+uv run --extra gpu osumapper train calibrate rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026"
+
+uv run --extra gpu osumapper train evaluate rhythm \
+  --data-root "$HOME/osumapper/training_data" \
+  --model "$HOME/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026"
+```
+
+Once that folder contains both `model.keras` and `config.json`, Studio selects
+V6 for generation on its next launch. Until then it safely continues using the
+complete V5 model. Resume V6 only when its dataset and split are unchanged and
+you are increasing the total epoch target.
 
 The default workspace is `training_data/`. You may place it elsewhere by passing
 the same `--data-root PATH` to every dataset, training, evaluation, and analysis

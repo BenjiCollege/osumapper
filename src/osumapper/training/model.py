@@ -46,17 +46,18 @@ def build_rhythm_model(
         "conformer-v3": "conformer-v3",
         "conformer-v4": "conformer-v4",
         "conformer-v5": "conformer-v5",
+        "conformer-v6": "conformer-v6",
     }
     try:
         selected_architecture = aliases[architecture.casefold()]
     except KeyError as exc:
         raise InputError(
-            "Architecture must be transformer-v1 or conformer-v2 through conformer-v5."
+            "Architecture must be transformer-v1 or conformer-v2 through conformer-v6."
         ) from exc
     conformer = selected_architecture.startswith("conformer-")
     dimension = model_dimension or (
         192
-        if selected_architecture == "conformer-v5"
+        if selected_architecture in {"conformer-v5", "conformer-v6"}
         else 160
         if selected_architecture in {"conformer-v3", "conformer-v4"}
         else 192
@@ -68,7 +69,7 @@ def build_rhythm_model(
     )
     heads = attention_heads or (
         6
-        if selected_architecture == "conformer-v5"
+        if selected_architecture in {"conformer-v5", "conformer-v6"}
         else 5
         if selected_architecture in {"conformer-v3", "conformer-v4"}
         else 6
@@ -84,15 +85,41 @@ def build_rhythm_model(
         (sequence_length, grid_dimension), name="grid_features", dtype="float32"
     )
     difficulty_input = keras.Input((difficulty_dimension,), name="difficulty", dtype="float32")
-    if selected_architecture == "conformer-v5" and difficulty_dimension != 7:
-        raise InputError("Conformer-v5 requires target stars plus six one-hot tier features.")
+    if selected_architecture in {"conformer-v5", "conformer-v6"} and difficulty_dimension != 7:
+        raise InputError(
+            f"{selected_architecture.title()} requires target stars plus six one-hot tier features."
+        )
 
-    audio = keras.layers.Conv1D(
-        dimension, kernel_size=5, padding="same", activation="gelu", name="audio_encoder"
-    )(audio_input)
+    if selected_architecture == "conformer-v6":
+        # A compact multi-scale stem captures short transients and longer
+        # musical phrases before attention. V6 uses one fewer Conformer block
+        # than V5, offsetting this small stem and reducing training latency.
+        audio_transients = keras.layers.Conv1D(
+            dimension // 2,
+            kernel_size=3,
+            padding="same",
+            activation="gelu",
+            name="audio_transient_encoder",
+        )(audio_input)
+        audio_phrases = keras.layers.Conv1D(
+            dimension // 2,
+            kernel_size=9,
+            dilation_rate=2,
+            padding="same",
+            activation="gelu",
+            name="audio_phrase_encoder",
+        )(audio_input)
+        audio = keras.layers.Concatenate(name="audio_multiscale_fusion")(
+            [audio_transients, audio_phrases]
+        )
+        audio = keras.layers.Dense(dimension, name="audio_encoder")(audio)
+    else:
+        audio = keras.layers.Conv1D(
+            dimension, kernel_size=5, padding="same", activation="gelu", name="audio_encoder"
+        )(audio_input)
     audio = keras.layers.LayerNormalization(name="audio_normalization")(audio)
     grid = keras.layers.Dense(dimension // 2, activation="gelu", name="grid_encoder")(grid_input)
-    if selected_architecture == "conformer-v5":
+    if selected_architecture in {"conformer-v5", "conformer-v6"}:
         # Keep difficulty outside the shared song encoder. All six heads see
         # the same encoded music and grid; the one-hot tier input only selects
         # which head receives the loss for this curated human difficulty.
@@ -107,7 +134,12 @@ def build_rhythm_model(
         combined = keras.layers.Concatenate(name="feature_fusion")([audio, grid, difficulty])
     sequence = keras.layers.Dense(dimension, name="fusion_projection")(combined)
     attention_mask = None
-    if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}:
+    if selected_architecture in {
+        "conformer-v3",
+        "conformer-v4",
+        "conformer-v5",
+        "conformer-v6",
+    }:
         # The musical grid is non-zero for every real candidate and zero for
         # padded positions, so this prevents padding from affecting attention.
         valid_steps = keras.ops.any(keras.ops.not_equal(grid_input, 0.0), axis=-1)
@@ -175,7 +207,12 @@ def build_rhythm_model(
             convolution = keras.layers.LayerNormalization(
                 name=f"conformer_convolution_norm_{block}"
             )(sequence)
-            if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}:
+            if selected_architecture in {
+                "conformer-v3",
+                "conformer-v4",
+                "conformer-v5",
+                "conformer-v6",
+            }:
                 convolution_value = keras.layers.Dense(
                     dimension,
                     name=f"conformer_convolution_value_{block}",
@@ -204,7 +241,8 @@ def build_rhythm_model(
             )(convolution)
             normalization = (
                 keras.layers.LayerNormalization
-                if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}
+                if selected_architecture
+                in {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6"}
                 else keras.layers.BatchNormalization
             )
             convolution = normalization(name=f"conformer_convolution_batch_norm_{block}")(
@@ -243,37 +281,94 @@ def build_rhythm_model(
     sequence = keras.layers.LayerNormalization(name="output_normalization")(sequence)
     # Mixed precision keeps the expensive encoder on Tensor Cores, while a
     # float32 probability head avoids underflow in calibration and weighted BCE.
-    if selected_architecture == "conformer-v5":
+    if selected_architecture in {"conformer-v5", "conformer-v6"}:
         tier_names = ("easy", "normal", "hard", "insane", "expert", "expert_plus")
         tier_outputs = []
-        star_context = keras.layers.Dense(16, activation="gelu", name="target_star_encoder")(
-            difficulty_input[:, :1]
-        )
-        star_context = keras.layers.RepeatVector(sequence_length, name="target_star_broadcast")(
-            star_context
-        )
-        head_input = keras.layers.Concatenate(name="difficulty_head_input")(
-            [sequence, star_context]
-        )
-        for index, tier_name in enumerate(tier_names):
-            # Expert heads have extra capacity for complex rhythms while all
-            # heads retain independent decision boundaries.
-            head_dimension = dimension if index >= 4 else dimension // 2
-            head = keras.layers.Dense(
-                head_dimension,
-                activation="gelu",
-                name=f"{tier_name}_rhythm_head",
-            )(head_input)
-            head = keras.layers.Dropout(dropout, name=f"{tier_name}_head_dropout")(head)
-            tier_outputs.append(
-                keras.layers.Dense(
-                    1,
-                    activation="sigmoid",
-                    dtype="float32",
-                    name=f"{tier_name}_probability",
-                )(head)
+        if selected_architecture == "conformer-v6":
+            # V6 predicts nested difficulty odds. Each harder tier adds a
+            # non-negative learned logit increment, so a musically important
+            # Easy event cannot become less likely on Expert+. Target-star
+            # conditioning also uses a non-negative coefficient, preserving
+            # the guarantee when both the tier and requested stars increase.
+            head_input = sequence
+            star_logit = keras.layers.Dense(
+                1,
+                use_bias=False,
+                kernel_initializer=keras.initializers.Constant(1.0),
+                kernel_constraint=keras.constraints.NonNeg(),
+                dtype="float32",
+                name="monotonic_target_star_logit",
+            )(difficulty_input[:, :1])
+            star_logit = keras.layers.RepeatVector(sequence_length, name="target_star_broadcast")(
+                star_logit
             )
-        all_tiers = keras.layers.Concatenate(name="difficulty_head_probabilities")(tier_outputs)
+            easy_head = keras.layers.Dense(
+                dimension // 2,
+                activation="gelu",
+                name="easy_rhythm_head",
+            )(head_input)
+            easy_head = keras.layers.Dropout(dropout, name="easy_head_dropout")(easy_head)
+            easy_content_logit = keras.layers.Dense(
+                1,
+                dtype="float32",
+                name="easy_content_logit",
+            )(easy_head)
+            current_logit = keras.layers.Add(name="easy_rhythm_logit")(
+                [easy_content_logit, star_logit]
+            )
+            tier_logits = [current_logit]
+            for index, tier_name in enumerate(tier_names[1:], start=1):
+                head_dimension = dimension if index >= 4 else dimension // 2
+                adapter = keras.layers.Dense(
+                    head_dimension,
+                    activation="gelu",
+                    name=f"{tier_name}_rhythm_head",
+                )(head_input)
+                adapter = keras.layers.Dropout(dropout, name=f"{tier_name}_head_dropout")(adapter)
+                increment = keras.layers.Dense(
+                    1,
+                    activation="softplus",
+                    bias_initializer=keras.initializers.Constant(-3.0),
+                    dtype="float32",
+                    name=f"{tier_name}_nesting_increment",
+                )(adapter)
+                current_logit = keras.layers.Add(name=f"{tier_name}_nested_logit")(
+                    [current_logit, increment]
+                )
+                tier_logits.append(current_logit)
+            all_logits = keras.layers.Concatenate(name="nested_difficulty_logits")(tier_logits)
+            all_tiers = keras.layers.Activation(
+                "sigmoid", dtype="float32", name="difficulty_head_probabilities"
+            )(all_logits)
+        else:
+            star_context = keras.layers.Dense(16, activation="gelu", name="target_star_encoder")(
+                difficulty_input[:, :1]
+            )
+            star_context = keras.layers.RepeatVector(sequence_length, name="target_star_broadcast")(
+                star_context
+            )
+            head_input = keras.layers.Concatenate(name="difficulty_head_input")(
+                [sequence, star_context]
+            )
+            for index, tier_name in enumerate(tier_names):
+                # Expert heads have extra capacity for complex rhythms while all
+                # heads retain independent decision boundaries.
+                head_dimension = dimension if index >= 4 else dimension // 2
+                head = keras.layers.Dense(
+                    head_dimension,
+                    activation="gelu",
+                    name=f"{tier_name}_rhythm_head",
+                )(head_input)
+                head = keras.layers.Dropout(dropout, name=f"{tier_name}_head_dropout")(head)
+                tier_outputs.append(
+                    keras.layers.Dense(
+                        1,
+                        activation="sigmoid",
+                        dtype="float32",
+                        name=f"{tier_name}_probability",
+                    )(head)
+                )
+            all_tiers = keras.layers.Concatenate(name="difficulty_head_probabilities")(tier_outputs)
         tier_selector = keras.layers.RepeatVector(sequence_length, name="tier_selector_broadcast")(
             difficulty_input[:, 1:]
         )
@@ -308,10 +403,14 @@ def build_rhythm_model(
         jit_compile=jit_compile,
         optimizer_name=(
             "adamw"
-            if selected_architecture in {"conformer-v3", "conformer-v4", "conformer-v5"}
+            if selected_architecture
+            in {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6"}
             else "adam"
         ),
         weight_decay=weight_decay,
+        loss_name=(
+            "hard-negative-focal" if selected_architecture == "conformer-v6" else "weighted-bce"
+        ),
     )
     return model
 
@@ -383,6 +482,52 @@ def _weighted_binary_crossentropy(keras: Any, positive_weight: float) -> Any:
     return WeightedBinaryCrossentropy(positive_weight=positive_weight)
 
 
+def _hard_negative_focal_crossentropy(keras: Any, positive_weight: float) -> Any:
+    @keras.saving.register_keras_serializable(package="osumapper")
+    class HardNegativeFocalCrossentropy(keras.losses.Loss):
+        """Focus V6 updates on false positives and missed musical events."""
+
+        def __init__(
+            self,
+            positive_weight: float = 1.0,
+            positive_gamma: float = 1.0,
+            negative_gamma: float = 2.0,
+            name: str = "hard_negative_focal_crossentropy",
+            **kwargs: Any,
+        ) -> None:
+            super().__init__(name=name, **kwargs)
+            self.positive_weight = float(positive_weight)
+            self.positive_gamma = float(positive_gamma)
+            self.negative_gamma = float(negative_gamma)
+
+        def call(self, y_true: Any, y_pred: Any) -> Any:
+            ops = keras.ops
+            actual = ops.cast(y_true, y_pred.dtype)
+            probability = ops.clip(y_pred, keras.backend.epsilon(), 1.0 - keras.backend.epsilon())
+            positive = (
+                self.positive_weight
+                * actual
+                * ops.power(1.0 - probability, self.positive_gamma)
+                * ops.log(probability)
+            )
+            negative = (
+                (1.0 - actual)
+                * ops.power(probability, self.negative_gamma)
+                * ops.log(1.0 - probability)
+            )
+            return -(positive + negative)
+
+        def get_config(self) -> dict[str, Any]:
+            return {
+                **super().get_config(),
+                "positive_weight": self.positive_weight,
+                "positive_gamma": self.positive_gamma,
+                "negative_gamma": self.negative_gamma,
+            }
+
+    return HardNegativeFocalCrossentropy(positive_weight=positive_weight)
+
+
 def compile_rhythm_model(
     model: Any,
     *,
@@ -391,6 +536,7 @@ def compile_rhythm_model(
     jit_compile: bool | str = "auto",
     optimizer_name: str = "adam",
     weight_decay: float = 0.0,
+    loss_name: str = "weighted-bce",
 ) -> None:
     keras = _require_keras()
     if optimizer_name == "adamw":
@@ -401,9 +547,15 @@ def compile_rhythm_model(
         )
     else:
         optimizer = keras.optimizers.Adam(learning_rate=learning_rate, clipnorm=1.0)
+    if loss_name == "weighted-bce":
+        loss = _weighted_binary_crossentropy(keras, positive_weight)
+    elif loss_name == "hard-negative-focal":
+        loss = _hard_negative_focal_crossentropy(keras, positive_weight)
+    else:
+        raise InputError(f"Unsupported rhythm loss: {loss_name}")
     model.compile(
         optimizer=optimizer,
-        loss=_weighted_binary_crossentropy(keras, positive_weight),
+        loss=loss,
         metrics=[
             keras.metrics.Precision(name="precision", thresholds=0.5),
             keras.metrics.Recall(name="recall", thresholds=0.5),

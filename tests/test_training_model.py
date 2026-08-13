@@ -178,6 +178,62 @@ class TrainingModelTests(unittest.TestCase):
             np.testing.assert_allclose(prediction, tier_predictions[:, :, 5:6], atol=1e-6)
             np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
 
+    def test_conformer_v6_has_nested_round_trip_difficulty_heads(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            model = build_rhythm_model(
+                audio_dimension=20,
+                grid_dimension=6,
+                difficulty_dimension=7,
+                sequence_length=16,
+                architecture="conformer-v6",
+                model_dimension=48,
+                transformer_blocks=1,
+                attention_heads=6,
+                jit_compile=False,
+            )
+            inputs = {
+                "audio_features": np.zeros((6, 16, 20), dtype=np.float32),
+                "grid_features": np.zeros((6, 16, 6), dtype=np.float32),
+                "difficulty": np.asarray(
+                    [
+                        [0.150, 1, 0, 0, 0, 0, 0],
+                        [0.235, 0, 1, 0, 0, 0, 0],
+                        [0.335, 0, 0, 1, 0, 0, 0],
+                        [0.465, 0, 0, 0, 1, 0, 0],
+                        [0.590, 0, 0, 0, 0, 1, 0],
+                        [0.700, 0, 0, 0, 0, 0, 1],
+                    ],
+                    dtype=np.float32,
+                ),
+            }
+            inputs["grid_features"][:, :4, 0] = 0.4
+            prediction = model.predict(inputs, verbose=0)
+            import keras
+
+            head_model = keras.Model(
+                model.input,
+                model.get_layer("difficulty_head_probabilities").output,
+            )
+            tier_predictions = head_model.predict(inputs, verbose=0)
+            destination = Path(name) / "conformer-v6.keras"
+            model.save(destination)
+            reloaded = load_rhythm_model(destination, compile_model=False).predict(
+                inputs, verbose=0
+            )
+
+            self.assertEqual(model.name, "osumapper_rhythm_conformer_v6")
+            self.assertEqual(prediction.shape, (6, 16, 1))
+            self.assertEqual(tier_predictions.shape, (6, 16, 6))
+            self.assertTrue(np.all(np.diff(tier_predictions, axis=-1) >= -1e-7))
+            self.assertTrue(np.all(np.diff(prediction[:, :, 0], axis=0) >= -1e-7))
+            np.testing.assert_allclose(
+                prediction[5:6],
+                tier_predictions[5:6, :, 5:6],
+                rtol=1e-3,
+                atol=1e-3,
+            )
+            np.testing.assert_allclose(prediction, reloaded, rtol=2e-3, atol=1e-3)
+
     def test_placement_analyzer_reports_safe_fixture(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)

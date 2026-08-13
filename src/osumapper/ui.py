@@ -48,6 +48,7 @@ ACCENT_ACTIVE = "#79a2ff"
 SUCCESS = "#42c89a"
 ERROR = "#ff6b7a"
 DEFAULT_RHYTHM_MODEL = "rhythm-conformer-v5-curated-run1-seed-2026"
+DEFAULT_V6_TRAINING_MODEL = "rhythm-conformer-v6-curated-657-songs-seed-2026"
 DEFAULT_PLACEMENT_MODEL = "placement-v1"
 
 
@@ -114,13 +115,30 @@ def summarize_process_error(message: str | None) -> str:
 
 def default_generation_models(root: Path) -> tuple[Path, Path]:
     modern_root = root / "models" / "modern"
-    rhythm = Path(
-        os.environ.get("OSUMAPPER_RHYTHM_MODEL", modern_root / DEFAULT_RHYTHM_MODEL)
-    ).expanduser()
+    configured_rhythm = os.environ.get("OSUMAPPER_RHYTHM_MODEL")
+    if configured_rhythm:
+        rhythm = Path(configured_rhythm).expanduser()
+    else:
+        trained_v6 = modern_root / DEFAULT_V6_TRAINING_MODEL
+        v6_model, v6_config = model_bundle_paths(trained_v6)
+        rhythm = (
+            trained_v6
+            if v6_model.is_file() and v6_config.is_file()
+            else modern_root / DEFAULT_RHYTHM_MODEL
+        )
     placement = Path(
         os.environ.get("OSUMAPPER_PLACEMENT_MODEL", modern_root / DEFAULT_PLACEMENT_MODEL)
     ).expanduser()
     return rhythm, placement
+
+
+def default_training_model(root: Path) -> Path:
+    return Path(
+        os.environ.get(
+            "OSUMAPPER_TRAINING_MODEL",
+            root / "models" / "modern" / DEFAULT_V6_TRAINING_MODEL,
+        )
+    ).expanduser()
 
 
 def model_bundle_paths(model: Path) -> tuple[Path, Path]:
@@ -399,8 +417,8 @@ class OsumapperStudio:
         self.songs_root = tk.StringVar(value=str(dataset_config.get("songs_root", "")))
         self.include_unrated = tk.BooleanVar(value=False)
         self.trust_imported_osz = tk.BooleanVar(value=False)
-        self.train_architecture = tk.StringVar(value="conformer-v5")
-        self.train_output = tk.StringVar(value=str(default_rhythm_model))
+        self.train_architecture = tk.StringVar(value="conformer-v6")
+        self.train_output = tk.StringVar(value=str(default_training_model(root)))
         self.placement_output = tk.StringVar(value=str(default_placement_model))
         self.epochs = tk.StringVar(value="50")
         self.batch_size = tk.StringVar(value="32")
@@ -699,6 +717,7 @@ class OsumapperStudio:
             "Architecture",
             self.train_architecture,
             (
+                "conformer-v6",
                 "conformer-v5",
                 "conformer-v4",
                 "conformer-v3",
@@ -737,8 +756,9 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Resume only the exact same model output, architecture, and split. "
-                "Use a new folder when changing architecture or data."
+                "V6 uses nested tier probabilities and hard-negative focal training. "
+                "Resume only the exact same model output, architecture, and unchanged split. "
+                "For changed data, leave Resume off and use this new V6 folder."
             ),
             style="CardText.TLabel",
             wraplength=410,

@@ -285,8 +285,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-v3",
             "conformer-v4",
             "conformer-v5",
+            "conformer-v6",
         ),
-        default="conformer-v5",
+        default="conformer-v6",
     )
     dataset_windows.add_argument("--rebuild", action="store_true")
 
@@ -341,13 +342,14 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-v3",
             "conformer-v4",
             "conformer-v5",
+            "conformer-v6",
         ),
-        default="conformer-v5",
+        default="conformer-v6",
     )
     train_rhythm_parser.add_argument(
         "--audio-context-radius",
         type=int,
-        help="feature frames on each side (default: 4 for v2, 0 for v1/v3/v4/v5)",
+        help="feature frames on each side (default: 4 for v2, 0 for v1/v3/v4/v5/v6)",
     )
 
     train_placement_parser = train_sub.add_parser(
@@ -649,6 +651,7 @@ def _dataset(args: argparse.Namespace) -> int:
         difficulty_features = {
             "conformer-v4": STAR_DIFFICULTY_FEATURES,
             "conformer-v5": V5_DIFFICULTY_FEATURES,
+            "conformer-v6": V5_DIFFICULTY_FEATURES,
         }.get(args.architecture, LEGACY_DIFFICULTY_FEATURES)
         for split in ("train", "validation", "test"):
             rows = load_split(split, dataset_root=args.data_root)

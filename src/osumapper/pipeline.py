@@ -791,7 +791,7 @@ def _write_full_set_reports(
         },
         "difficulty_results": difficulty_rows,
         "rankability": "not-rankable-generated-draft",
-        "next_model_milestones": ["conformer-v5-full-set", "placement-v2"],
+        "next_model_milestones": ["conformer-v6-nested-full-set", "placement-v2"],
         "limitations": [
             "V4 runs each difficulty independently; learned cross-tier nesting requires V5.",
             "PatternPlanner-v1 is deterministic and timing-aware, but learned Placement-v2, "

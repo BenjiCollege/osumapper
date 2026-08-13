@@ -48,6 +48,7 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
 
 def default_model_root(architecture: str = "conformer-v4") -> Path:
     name = {
+        "conformer-v6": "rhythm-conformer-v6-full-set",
         "conformer-v5": "rhythm-conformer-v5-full-set",
         "conformer-v4": "rhythm-conformer-v4-standard-stars",
         "conformer-v3": "rhythm-conformer-v3",
@@ -185,6 +186,25 @@ def train_rhythm(
     if split_manifest is None:
         raise InputError("Dataset has not been split. Run `osumapper dataset split` first.")
 
+    # Resume identity is cheap to validate and must happen before feature or
+    # window-cache work. A changed split should fail in seconds, not after the
+    # user waits for thousands of windows to be rebuilt.
+    previous_config: dict[str, Any] | None = None
+    previous_manifest: dict[str, Any] | None = None
+    if resume:
+        previous_config = read_json(config_path, default=None)
+        previous_manifest = read_json(output_root / "dataset_manifest.json", default=None)
+        if previous_config is None or previous_manifest is None:
+            raise InputError(
+                f"Cannot resume because configuration or dataset metadata is missing under "
+                f"{output_root}."
+            )
+        if previous_manifest.get("split_manifest") != split_manifest:
+            raise InputError(
+                "The dataset or song-level split changed after this run started; "
+                "resume is unsafe. Uncheck Resume and use a new --output directory."
+            )
+
     feature_summary = extract_dataset_features(
         dataset_root=paths.root, progress=lambda message: print(f"[features] {message}")
     )
@@ -204,6 +224,7 @@ def train_rhythm(
     difficulty_features = {
         "conformer-v4": STAR_DIFFICULTY_FEATURES,
         "conformer-v5": V5_DIFFICULTY_FEATURES,
+        "conformer-v6": V5_DIFFICULTY_FEATURES,
     }.get(training_config.architecture, LEGACY_DIFFICULTY_FEATURES)
     train_dataset, train_summary = make_tf_dataset(
         train_rows,
@@ -237,18 +258,7 @@ def train_rhythm(
     history: dict[str, list[float]] = {}
     initial_epoch = 0
     if resume:
-        previous_config = read_json(config_path, default=None)
-        previous_manifest = read_json(output_root / "dataset_manifest.json", default=None)
-        if previous_config is None or previous_manifest is None:
-            raise InputError(
-                f"Cannot resume because configuration or dataset metadata is missing under "
-                f"{output_root}."
-            )
-        if previous_manifest.get("split_manifest") != split_manifest:
-            raise InputError(
-                "The dataset or song-level split changed after this run started; "
-                "resume is unsafe. Use a new --output directory."
-            )
+        assert previous_config is not None
         previous_training = previous_config.get("training", {})
         if int(previous_training.get("sequence_length", -1)) != training_config.sequence_length:
             raise InputError("--sequence-length must match the original run when resuming.")
@@ -317,10 +327,15 @@ def train_rhythm(
                 optimizer_name=(
                     "adamw"
                     if training_config.architecture
-                    in {"conformer-v3", "conformer-v4", "conformer-v5"}
+                    in {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6"}
                     else "adam"
                 ),
                 weight_decay=training_config.weight_decay,
+                loss_name=(
+                    "hard-negative-focal"
+                    if training_config.architecture == "conformer-v6"
+                    else "weighted-bce"
+                ),
             )
         elif resume_path.exists():
             model = build_rhythm_model(
@@ -460,6 +475,11 @@ def train_rhythm(
             "grid_dimension": train_summary.grid_dimension,
             "difficulty_dimension": train_summary.difficulty_dimension,
             "difficulty_features": list(difficulty_features),
+            "training_objective": (
+                "hard-negative-focal"
+                if training_config.architecture == "conformer-v6"
+                else "weighted-bce"
+            ),
             "class_weight_positive": train_summary.positive_weight,
             "window_cache": {
                 "train": train_summary.cache_path,
