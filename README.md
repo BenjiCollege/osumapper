@@ -20,10 +20,12 @@ Give osumapper one favorite song and receive one playable osu!standard `.osz`
 containing Easy, Normal, Hard, Insane, Expert, and Expert+, with the strongest
 quality emphasis on Expert and Expert+. The current **FullSet-v1** implementation
 establishes the six-map packaging and validation boundary using Conformer-v4.
-An initial Conformer-v5 prototype now supplies one shared music encoder and six
-tier-specific rhythm heads. One-pass full-set inference, auxiliary section heads,
-learned cross-difficulty nesting, and Placement-v2 remain research milestones. See
-[`ROADMAP.md`](ROADMAP.md) for the phased quality plan and release gates.
+Conformer-v5 added one shared music encoder with six tier-specific rhythm heads,
+and Conformer-v6 constrains those heads to be monotonically nested. Placement-v2
+adds difficulty-conditioned, position-anchored learned placement. One-pass
+full-set inference, auxiliary section heads, and hitsound planning remain research
+milestones. See [`ROADMAP.md`](ROADMAP.md) for the phased quality plan and release
+gates.
 
 The original 2020 implementations are preserved unchanged under [`v6.2/`](v6.2/)
 and [`v7.0/`](v7.0/). See [`legacy/README.md`](legacy/README.md) for the Git safety
@@ -54,7 +56,9 @@ baseline and compatibility policy.
 - Mixed-precision RTX training, optional XLA, float16 window shards, per-song
   balancing, AdamW, learning-rate reduction, and early stopping.
 - A Placement-v1 learner for flow, object types, slider lengths, and combo
-  changes, plus a standalone placement/playability analyzer.
+  changes, superseded by difficulty-conditioned Placement-v2 with absolute
+  position anchoring, slider repeats, and hold length, plus a standalone
+  placement/playability analyzer.
 - An osu!standard ranking-criteria audit that reports objective rules,
   measurable guidelines, and mandatory manual checks without claiming rankability.
 - Representative fixtures, golden-output tests, safe-archive tests, and
@@ -218,8 +222,9 @@ Hard favor readability, near-stacks, and more sliders. Expert and Expert+ permit
 larger movement, tighter streams, and sparse exact stacks. The planner never adds
 rhythm timestamps: timing precision remains the responsibility of Conformer-v4,
 and star calibration plus the criteria audit still gate export. This is a bounded
-heuristic placement system, not the future learned Placement-v2 model; every map
-still requires listening, test play, and human editing.
+heuristic placement system and remains the default; the learned Placement-v2
+alternative is selected with `--flow-engine placement`. Every map still requires
+listening, test play, and human editing.
 
 ## Command examples
 
@@ -295,11 +300,14 @@ Use **Clear queue** when you are ready for another song. The queue shows each
 item's state and output, can be stopped, and can retry failed or stopped items.
 Generation controls expose the preset, ruleset, seed, flow/rhythm engines, modern
 model, validation-calibrated threshold override, density, difficulty, BPM,
-offset, and mania keys. Studio now defaults to the tested
-`rhythm-conformer-v5-curated-run1-seed-2026` rhythm model, deterministic
+offset, and mania keys. Studio prefers a trained
+`rhythm-conformer-v6-curated-657-songs-seed-2026` rhythm model and falls back to
+the complete `rhythm-conformer-v5-curated-run1-seed-2026` until that folder holds
+both `model.keras` and `config.json`. It also defaults to deterministic
 PatternPlanner, complete six-difficulty generation, the installed-lazer star
-calculator, seed 2026, and ±0.03★ precision. Learned placement remains optional:
-selecting it requires a real `placement-v1/model.keras` plus `config.json`.
+calculator, seed 2026, and ±0.03★ precision. Learned placement remains optional
+and follows the same rule: `placement-v2` is selected once trained, otherwise
+`placement-v1`, and choosing it requires a real `model.keras` plus `config.json`.
 
 **Import completed packages into osu!lazer** is deliberately disabled by default.
 Importing a local package must not be treated as a filename- or title-based
@@ -312,7 +320,7 @@ not passed to generation.
 
 The **Training lab** tab provides safe `.osz` ingestion, explicit GOOD-map
 curation, scan/statistics/split/feature/window controls, Conformer-v6 and
-Placement-v1 GPU training, calibration, held-out evaluation, review packages,
+Placement-v2 GPU training, calibration, held-out evaluation, review packages,
 and placement analysis. Both sides scroll independently on smaller screens. The
 **Activity** tab keeps detailed process output and actionable errors.
 
@@ -354,13 +362,13 @@ The most useful `generate` options are:
 | `--rhythm-engine legacy` | Use the preserved v7 rhythm path; this remains the default. |
 | `--rhythm-engine modern` | Use a locally trained modern osu!standard rhythm model. |
 | `--modern-model PATH` | Select a modern model directory or `.keras` file. |
-| `--placement-model PATH` | Select a trained Placement-v1 directory or `.keras` file. |
+| `--placement-model PATH` | Select a trained Placement-v2 or Placement-v1 directory or `.keras` file. |
 | `--rhythm-threshold NUMBER` | Override the modern model's hit-probability threshold. |
 | `--target-density NUMBER` | Cap modern output at a target number of objects per second. |
 | `--flow-engine auto` | With modern rhythm, use PatternPlanner-v1; legacy rhythm retains compatible legacy flow. |
 | `--flow-engine legacy` | Require the legacy per-map flow model. |
 | `--flow-engine deterministic` | Use seeded PatternPlanner-v1 for modern standard maps. |
-| `--flow-engine placement` | Use learned Placement-v1 flow with the modern rhythm engine. |
+| `--flow-engine placement` | Use the learned placement model with the modern rhythm engine. |
 | `--bpm NUMBER` | Override timing estimation for audio-only input. |
 | `--offset MS` | Set the first timing-point offset for audio-only input. |
 | `--keys NUMBER` | Set mania key count for audio-only input. |
@@ -1034,19 +1042,49 @@ changes the decision threshold rather than probability ranking.
 Five deterministic review packages from this baseline are available locally at
 `output/held-out-review-transformer-v1/` with their exact source-map manifest.
 
-### 5. Train Placement-v1 and analyze flow
+### 5. Train Placement-v2 and analyze flow
 
-Rhythm decides *when* objects occur. Placement-v1 is a separate model that
-learns rotationally relative jump distance/turn patterns, circle/slider/spinner
-type, slider length, and combo changes from the same song-level split. It is kept
-separate so rhythm-v3 can be evaluated before placement changes the output.
+Rhythm decides *when* objects occur; placement decides *where* and *what*. It is
+kept as a separate model so a rhythm architecture can be evaluated before
+placement changes the output.
+
+**Placement-v1** learned rotationally relative jump distance/turn, object type,
+slider length, and combo changes from 11 purely local timing features. It could
+not see which difficulty it was writing for, had no notion of absolute playfield
+position, and its predictions ignored the spacing scale that star calibration
+tunes.
+
+**Placement-v2** is the current architecture and keeps every V1 signal while
+adding:
+
+- **difficulty conditioning** — the requested target star rating plus the same
+  six one-hot tier features Conformer-v5/v6 use, so one model writes Easy and
+  Expert+ differently instead of rescaling one average style;
+- **musical-measure context** — measure phase, downbeat, rhythm asymmetry, and a
+  stream-strength signal, rather than beat phase alone;
+- **absolute position targets** — the model predicts where in the playfield the
+  object belongs, not only how far to move. Reconstruction blends that anchor
+  into the *direction* of each step while keeping the *distance* exactly as
+  predicted, which removes the slow drift a purely relative walk accumulates
+  without weakening spacing control;
+- **slider repeats and hold length**, emitted only when the traversal actually
+  fits before the next object;
+- a **Conformer encoder** — five macaron feed-forward/attention/depthwise-conv
+  blocks at width 192 with explicit padding masks, replacing three plain
+  attention blocks at width 128;
+- a **rebalanced objective** — Huber terms for distance, slider length, repeats,
+  hold, and position; class-weighted type loss so rare sliders and spinners are
+  not swamped by circles; a positive-weighted combo loss; and a unit-norm
+  regulariser that keeps the turn head on the circle.
 
 Train it on the RTX 4070 after the rated-only split is stable:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
   --data-root "$HOME/osumapper/training_data" \
-  --output "$HOME/osumapper/models/modern/placement-v1-rated-seed-2026" \
+  --output "$HOME/osumapper/models/modern/placement-v2-rated-seed-2026" \
+  --architecture placement-v2 \
+  --model-dimension 192 --blocks 5 --attention-heads 6 --dropout 0.15 \
   --epochs 75 \
   --batch-size 32 \
   --learning-rate 0.0005 \
@@ -1059,18 +1097,27 @@ CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
   --seed 2026
 ```
 
-Evaluate jump distance, turn angle, object type, slider length, and combo
-prediction on held-out test songs:
+`--model-dimension` must divide evenly by `--attention-heads`. Raising the width
+and block count increases capacity and VRAM use; keep the frozen split and start
+a separately named run whenever either changes, because `--resume` deliberately
+refuses a changed architecture, capacity, or split.
+
+Evaluate jump distance, turn angle, object type, slider length, repeats, hold
+length, absolute position, per-class recall, and per-tier accuracy on held-out
+test songs:
 
 ```bash
 uv run --extra gpu osumapper train evaluate placement \
   --data-root "$HOME/osumapper/training_data" \
-  --model "$HOME/osumapper/models/modern/placement-v1-rated-seed-2026"
+  --model "$HOME/osumapper/models/modern/placement-v2-rated-seed-2026"
 ```
 
 Placement inference constrains generated objects and slider endpoints to the
-playfield and caps jump distance using the available time. It remains an
-experimental learned starting point; review every map in the osu! editor.
+playfield, caps jump distance using the available time, and rotates to the
+nearest legal direction rather than shortening a jump at the playfield edge.
+Placement-v1 models remain loadable: the recorded architecture in `config.json`
+selects the matching feature set and reconstruction. Both remain experimental
+learned starting points; review every map in the osu! editor.
 
 Analyze any standard `.osu` map without training a placement model:
 
@@ -1086,12 +1133,13 @@ measure obvious flow/playability problems; they are not proof of map quality.
 ### Recommended research order
 
 Preserve and evaluate the completed V4 benchmark first. Curate GOOD-only maps,
-then train Conformer-v5 Full-Set with a shared encoder, six tier heads, Expert and
-Expert+ capacity/weighting, auxiliary musical targets, hard negatives, and
-per-tier calibration. Placement-v2 follows after rhythm wins on the frozen split.
-Optional frozen MERT features are an ablation only after those controlled
-baselines are stable. The complete sequence and acceptance targets are maintained
-in [`ROADMAP.md`](ROADMAP.md).
+then train Conformer-v6 with its shared multi-scale encoder, six monotonically
+nested tier heads, Expert and Expert+ capacity, hard-negative focal training, and
+per-tier calibration. Train Placement-v2 on the same frozen split once rhythm
+wins, and compare it against both Placement-v1 and PatternPlanner-v1 on held-out
+songs before making it the generation default. Optional frozen MERT features are
+an ablation only after those controlled baselines are stable. The complete
+sequence and acceptance targets are maintained in [`ROADMAP.md`](ROADMAP.md).
 
 Inspect one human map against the model and export a timestamp-by-timestamp JSON
 and CSV timeline:
@@ -1121,13 +1169,17 @@ Use both learned models in WSL after training:
 ```bash
 uv run --extra gpu osumapper generate song.osz \
   --rhythm-engine modern \
-  --modern-model "$HOME/osumapper/models/modern/rhythm-conformer-v3-rated-seed-2026" \
+  --modern-model "$HOME/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026" \
   --flow-engine placement \
-  --placement-model "$HOME/osumapper/models/modern/placement-v1-rated-seed-2026" \
-  --target-density 2.0 \
+  --placement-model "$HOME/osumapper/models/modern/placement-v2-rated-seed-2026" \
+  --difficulty-tier expert \
   --seed 2026 \
   --open
 ```
+
+Placement-v2 receives the requested tier, the target star rating, and the spacing
+scale chosen by star calibration, so `--flow-engine placement` participates in
+single-tier and `--full-set` calibration exactly like PatternPlanner-v1 does.
 
 ## Model migration and verification
 
@@ -1272,7 +1324,8 @@ models/modern/rhythm/    Ignored local modern-model output after training
 models/modern/rhythm-conformer-v2/  Separate ignored Conformer-v2 output
 models/modern/rhythm-conformer-v3/  Faster isolated Conformer-v3 output
 models/modern/rhythm-conformer-v4-standard-stars/  Standard star-conditioned V4 output
-models/modern/placement-v1/         Learned flow/object-type output
+models/modern/placement-v1/         Original learned flow/object-type output
+models/modern/placement-v2/         Difficulty-conditioned placement output
 training_data/           Ignored metadata, imports, splits, features, and window shards
 tests/                   Fixtures, golden outputs, and regression tests
 legacy/                  Preservation and compatibility documentation

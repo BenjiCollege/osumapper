@@ -281,14 +281,19 @@ def serialize_hit_object(obj: dict[str, Any], *, playfield_margin: int = 0) -> s
         generator = obj.get("sliderGenerator") or {}
         endpoint = generator.get("endpoint")
         length = max(1.0, float(generator.get("len", 100.0)))
+        # `slides` counts traversals, so 1 is a plain slider and 2 is one repeat.
+        # osu! requires one edge sound and one edge sample set per traversal edge.
+        slides = max(1, min(16, int(generator.get("repeats", 1))))
         if not endpoint:
             direction = generator.get("dOut", [1.0, 0.0])
             endpoint = [x + float(direction[0]) * length, y + float(direction[1]) * length]
         end_x = _clamp(float(endpoint[0]), margin, 512 - margin)
         end_y = _clamp(float(endpoint[1]), margin, 384 - margin)
+        edge_sounds = "|".join(["0"] * (slides + 1))
+        edge_sets = "|".join(["0:0"] * (slides + 1))
         return (
-            f"{x},{y},{timestamp},{2 | combo_flags},{hitsounds},L|{end_x}:{end_y},1,"
-            f"{length:.3f},0|0,0:0|0:0,{extended}"
+            f"{x},{y},{timestamp},{2 | combo_flags},{hitsounds},L|{end_x}:{end_y},{slides},"
+            f"{length:.3f},{edge_sounds},{edge_sets},{extended}"
         )
     if object_type & 8:
         end_time = max(timestamp + 1, int(obj.get("spinnerEndTime", timestamp + 1000)))

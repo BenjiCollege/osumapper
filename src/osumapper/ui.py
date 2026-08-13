@@ -49,7 +49,8 @@ SUCCESS = "#42c89a"
 ERROR = "#ff6b7a"
 DEFAULT_RHYTHM_MODEL = "rhythm-conformer-v5-curated-run1-seed-2026"
 DEFAULT_V6_TRAINING_MODEL = "rhythm-conformer-v6-curated-657-songs-seed-2026"
-DEFAULT_PLACEMENT_MODEL = "placement-v1"
+DEFAULT_PLACEMENT_MODEL = "placement-v2"
+LEGACY_PLACEMENT_MODEL = "placement-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,9 +127,17 @@ def default_generation_models(root: Path) -> tuple[Path, Path]:
             if v6_model.is_file() and v6_config.is_file()
             else modern_root / DEFAULT_RHYTHM_MODEL
         )
-    placement = Path(
-        os.environ.get("OSUMAPPER_PLACEMENT_MODEL", modern_root / DEFAULT_PLACEMENT_MODEL)
-    ).expanduser()
+    configured_placement = os.environ.get("OSUMAPPER_PLACEMENT_MODEL")
+    if configured_placement:
+        placement = Path(configured_placement).expanduser()
+    else:
+        trained_v2 = modern_root / DEFAULT_PLACEMENT_MODEL
+        v2_model, v2_config = model_bundle_paths(trained_v2)
+        placement = (
+            trained_v2
+            if v2_model.is_file() and v2_config.is_file()
+            else modern_root / LEGACY_PLACEMENT_MODEL
+        )
     return rhythm, placement
 
 
@@ -419,7 +428,13 @@ class OsumapperStudio:
         self.trust_imported_osz = tk.BooleanVar(value=False)
         self.train_architecture = tk.StringVar(value="conformer-v6")
         self.train_output = tk.StringVar(value=str(default_training_model(root)))
-        self.placement_output = tk.StringVar(value=str(default_placement_model))
+        self.placement_architecture = tk.StringVar(value=DEFAULT_PLACEMENT_MODEL)
+        # Training always targets the current architecture's own folder, even when
+        # generation is still falling back to an older trained placement model.
+        self.placement_output = tk.StringVar(
+            value=str(root / "models" / "modern" / DEFAULT_PLACEMENT_MODEL)
+        )
+        self.placement_architecture.trace_add("write", self._sync_placement_output)
         self.epochs = tk.StringVar(value="50")
         self.batch_size = tk.StringVar(value="32")
         self.learning_rate = tk.StringVar(value="0.0005")
@@ -706,8 +721,8 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Conformer-v5 shares one music encoder across six independently learned "
-                "osu!standard rhythm heads, with extra Expert and Expert+ training weight."
+                "Conformer-v6 shares one multi-scale music encoder across six monotonically "
+                "nested osu!standard rhythm heads, trained with a hard-negative focal objective."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -771,28 +786,41 @@ class OsumapperStudio:
             model, text="Stop active process", style="Danger.TButton", command=self._stop
         ).pack(fill="x", pady=3)
         ttk.Separator(model).pack(fill="x", pady=14)
-        ttk.Label(model, text="Placement-v1", style="CardTitle.TLabel").pack(anchor="w")
+        ttk.Label(model, text="Learned placement", style="CardTitle.TLabel").pack(anchor="w")
         ttk.Label(
             model,
             text=(
-                "Learn relative flow, object types, slider lengths, and combo changes "
-                "after rhythm-v5."
+                "Placement-v2 conditions flow on the requested tier and target stars, anchors "
+                "absolute playfield position, and predicts slider repeats and hold length. "
+                "Train it into its own folder; Placement-v1 stays readable for comparison."
             ),
             style="CardText.TLabel",
             wraplength=410,
         ).pack(anchor="w", pady=(3, 8))
+        self._combo_row(
+            model,
+            "Placement model",
+            self.placement_architecture,
+            ("placement-v2", "placement-v1"),
+        )
         self._entry_row(model, "Placement output", self.placement_output)
         ttk.Button(
             model,
-            text="Start Placement-v1 training",
+            text="Start placement training",
             style="Accent.TButton",
             command=self._train_placement,
         ).pack(fill="x", pady=3)
         ttk.Button(
             model,
-            text="Evaluate Placement-v1 on test songs",
+            text="Evaluate placement on test songs",
             command=self._evaluate_placement,
         ).pack(fill="x", pady=3)
+
+    def _sync_placement_output(self, *_args: object) -> None:
+        """Keep each placement architecture in its own folder by default."""
+        current = Path(self.placement_output.get().strip() or ".")
+        if current.name in {"placement-v1", "placement-v2"}:
+            self.placement_output.set(str(current.with_name(self.placement_architecture.get())))
 
     def _sync_target_stars(self, *_args: object) -> None:
         try:
@@ -1029,7 +1057,7 @@ class OsumapperStudio:
         )
         if self.rhythm_engine.get() == "modern":
             if model is None:
-                raise ValueError("Choose the trained V5 rhythm model folder.")
+                raise ValueError("Choose the trained modern rhythm model folder.")
             model_file, config_file = model_bundle_paths(model)
             if not model_file.is_file() or not config_file.is_file():
                 raise ValueError(
@@ -1037,15 +1065,15 @@ class OsumapperStudio:
                     "Expected model.keras and config.json."
                 )
         if self.flow_engine.get() == "placement" and self.rhythm_engine.get() != "modern":
-            raise ValueError("Placement-v1 requires the modern rhythm engine.")
+            raise ValueError("Learned placement requires the modern rhythm engine.")
         if self.flow_engine.get() == "placement":
             if placement_model is None:
-                raise ValueError("Choose a trained Placement-v1 model folder.")
+                raise ValueError("Choose a trained placement model folder.")
             placement_file, placement_config = model_bundle_paths(placement_model)
             if not placement_file.is_file() or not placement_config.is_file():
                 raise ValueError(
-                    f"Placement-v1 is not trained under {placement_model}. "
-                    "Keep Flow set to deterministic or train Placement-v1 first."
+                    f"No trained placement model exists under {placement_model}. "
+                    "Keep Flow set to deterministic or train Placement-v2 first."
                 )
         return GenerationOptions(
             preset=self.preset.get(),
@@ -1320,7 +1348,7 @@ class OsumapperStudio:
     def _train_placement(self) -> None:
         output = self.placement_output.get().strip()
         if not output:
-            messagebox.showerror("Missing placement output", "Choose a Placement-v1 output folder.")
+            messagebox.showerror("Missing placement output", "Choose a placement output folder.")
             return
         command = self._base_command() + [
             "train",
@@ -1329,6 +1357,8 @@ class OsumapperStudio:
             self.data_root.get(),
             "--output",
             output,
+            "--architecture",
+            self.placement_architecture.get(),
             "--epochs",
             self.epochs.get(),
             "--batch-size",
@@ -1354,12 +1384,12 @@ class OsumapperStudio:
             command.append("--resume")
         if not self.balance_songs.get():
             command.append("--no-balance-songs")
-        self._run_single(command, "Train Placement-v1")
+        self._run_single(command, f"Train {self.placement_architecture.get()}")
 
     def _evaluate_placement(self) -> None:
         model = self.placement_output.get().strip()
         if not model:
-            messagebox.showerror("Missing placement model", "Choose a Placement-v1 folder.")
+            messagebox.showerror("Missing placement model", "Choose a trained placement folder.")
             return
         command = self._base_command() + [
             "train",
@@ -1370,7 +1400,7 @@ class OsumapperStudio:
             "--model",
             model,
         ]
-        self._run_single(command, "Evaluate Placement-v1")
+        self._run_single(command, "Evaluate learned placement")
 
     def _calibrate(self) -> None:
         try:

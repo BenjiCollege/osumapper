@@ -332,8 +332,79 @@ class FullSetTests(unittest.TestCase):
             self.assertEqual(set_report["mean_star_error"], 0.0)
             self.assertTrue(set_report["all_precision_targets_met"])
             self.assertEqual(set_report["requested_star_precision"], 0.03)
+            self.assertEqual(set_report["placement_engine"], "pattern-planner-v1")
+            self.assertFalse(set_report["difficulty_nesting_enforced"])
             for profile in STANDARD_DIFFICULTIES:
                 self.assertTrue((root / f"full-set.{profile.key}.criteria.json").is_file())
+
+    def test_report_describes_the_models_that_actually_produced_the_package(self) -> None:
+        def fake_generate(document, _audio, _workspace, _preset, config, _progress):
+            profile = next(
+                item for item in STANDARD_DIFFICULTIES if item.key == config.difficulty_tier
+            )
+            return apply_standard_difficulty(document, profile).with_hit_objects(
+                [
+                    {"x": 128, "y": 192, "time": 1_000, "type": 1},
+                    {"x": 384, "y": 192, "time": 32_000, "type": 1},
+                ],
+                preset="test",
+                seed=config.seed,
+            )
+
+        audit = {
+            "issues": [],
+            "summary": {"errors": 0, "warnings": 0, "structural_error_occurrences": 0},
+        }
+        targets = [profile.default_stars for profile in STANDARD_DIFFICULTIES]
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "standard.osu"
+            source.write_bytes((FIXTURES / "standard.osu").read_bytes())
+            (root / "audio.wav").write_bytes(b"RIFF-fixture")
+            rhythm_model = root / "rhythm-v6"
+            rhythm_model.mkdir()
+            (rhythm_model / "config.json").write_text(
+                json.dumps({"training": {"architecture": "conformer-v6"}}), encoding="utf-8"
+            )
+            placement_model = root / "placement-v2"
+            placement_model.mkdir()
+            (placement_model / "config.json").write_text(
+                json.dumps({"architecture": "placement-v2"}), encoding="utf-8"
+            )
+            output = root / "described.osz"
+
+            with (
+                patch("osumapper.pipeline.generate_document", side_effect=fake_generate),
+                patch(
+                    "osumapper.pipeline.resolve_star_calculator",
+                    return_value=FakeStarCalculator(targets),
+                ),
+                patch("osumapper.pipeline.audit_standard_criteria", return_value=audit),
+            ):
+                generate_package(
+                    GenerationRequest(
+                        source=source,
+                        output=output,
+                        mode=GameMode.STANDARD,
+                        rhythm_engine="modern",
+                        flow_engine="placement",
+                        modern_model=rhythm_model,
+                        placement_model=placement_model,
+                        full_set=True,
+                    ),
+                    progress=lambda _message: None,
+                )
+
+            set_report = json.loads((root / "described.full-set.json").read_text(encoding="utf-8"))
+            limitations = " ".join(set_report["limitations"])
+
+            self.assertEqual(set_report["rhythm_architecture"], "conformer-v6")
+            self.assertTrue(set_report["difficulty_nesting_enforced"])
+            self.assertFalse(set_report["one_pass_full_set_inference"])
+            self.assertEqual(set_report["placement_engine"], "placement-v2")
+            self.assertIn("monotonically nested", limitations)
+            self.assertIn("Placement-v2", limitations)
+            self.assertNotIn("requires V5", limitations)
 
     def test_single_tier_generation_calibrates_before_export(self) -> None:
         def fake_generate(document, _audio, _workspace, _preset, config, _progress):

@@ -20,7 +20,7 @@ from osumapper.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
-    def test_v5_and_placement_paths_are_the_generation_defaults(self) -> None:
+    def test_untrained_v6_and_placement_v2_fall_back_to_the_previous_models(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             rhythm, placement = default_generation_models(Path("/home/test/osumapper"))
 
@@ -64,6 +64,18 @@ class UiHelperTests(unittest.TestCase):
                 rhythm, _placement = default_generation_models(root)
 
         self.assertEqual(rhythm, v6)
+
+    def test_trained_placement_v2_supersedes_placement_v1(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            placement_v2 = root / "models" / "modern" / "placement-v2"
+            placement_v2.mkdir(parents=True)
+            (placement_v2 / "model.keras").touch()
+            (placement_v2 / "config.json").write_text("{}", encoding="utf-8")
+            with patch.dict(os.environ, {}, clear=True):
+                _rhythm, placement = default_generation_models(root)
+
+        self.assertEqual(placement, placement_v2)
 
     def test_star_calibration_failure_is_summarized_for_queue_row(self) -> None:
         summary = summarize_process_error(

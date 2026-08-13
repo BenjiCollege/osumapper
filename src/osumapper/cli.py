@@ -62,6 +62,8 @@ from osumapper.training.features import extract_dataset_features
 from osumapper.training.loader import make_tf_dataset
 from osumapper.training.placement import analyze_placement
 from osumapper.training.placement_learning import (
+    DEFAULT_PLACEMENT_ARCHITECTURE,
+    PLACEMENT_ARCHITECTURES,
     PlacementTrainingConfig,
     evaluate_placement,
     train_placement,
@@ -371,6 +373,20 @@ def _build_parser() -> argparse.ArgumentParser:
     train_placement_parser.add_argument("--weight-decay", type=float, default=1e-4)
     train_placement_parser.add_argument("--no-balance-songs", action="store_true")
     train_placement_parser.add_argument("--resume", action="store_true")
+    train_placement_parser.add_argument(
+        "--architecture",
+        choices=PLACEMENT_ARCHITECTURES,
+        default=DEFAULT_PLACEMENT_ARCHITECTURE,
+    )
+    train_placement_parser.add_argument(
+        "--model-dimension",
+        type=int,
+        default=192,
+        help="placement-v2 encoder width; must divide evenly by --attention-heads",
+    )
+    train_placement_parser.add_argument("--blocks", type=int, default=5)
+    train_placement_parser.add_argument("--attention-heads", type=int, default=6)
+    train_placement_parser.add_argument("--dropout", type=float, default=0.15)
 
     train_evaluate = train_sub.add_parser(
         "evaluate", help="evaluate a model against held-out test songs only"
@@ -757,6 +773,11 @@ def _train(args: argparse.Namespace) -> int:
                 early_stopping_patience=args.early_stopping_patience,
                 weight_decay=args.weight_decay,
                 balance_songs=not args.no_balance_songs,
+                architecture=args.architecture,
+                model_dimension=args.model_dimension,
+                blocks=args.blocks,
+                attention_heads=args.attention_heads,
+                dropout=args.dropout,
             ),
             resume=args.resume,
         )

@@ -396,13 +396,19 @@ def generate_document(
         if config.flow_engine == "placement":
             from osumapper.training.placement_learning import predict_placement
 
-            progress("Generating learned Placement-v1 flow and object types")
+            progress(
+                "Generating learned placement flow and object types at "
+                f"{config.flow_scale:.3f}× spacing"
+            )
             objects = predict_placement(
                 document,
                 prediction.timestamps_ms,
                 model_root=config.placement_model,
                 target_density=prediction.target_density,
                 seed=config.seed,
+                difficulty_tier=config.difficulty_tier,
+                target_stars=config.target_stars,
+                flow_scale=config.flow_scale,
             )
         elif config.flow_engine in {"auto", "deterministic"}:
             from osumapper.patterns import plan_standard_patterns

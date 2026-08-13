@@ -40,6 +40,7 @@ _MAX_FLOW_SCALE = {
     "expert": 3.25,
     "expert-plus": 3.75,
 }
+_NESTED_RHYTHM_ARCHITECTURES = {"conformer-v6"}
 _GAMEPLAY_BLOCKING_CRITERIA = {
     "objects_on_same_tick",
     "circle_gap_below_10ms",
@@ -370,6 +371,66 @@ def _calibrated_tier_threshold(
         difficulty_tier=profile.key,
         target_density=profile.target_density,
     )
+
+
+def _rhythm_architecture(model_root: Path | None) -> str | None:
+    """Read the architecture recorded by `osumapper train rhythm`, if available."""
+
+    from osumapper.training.storage import read_json
+    from osumapper.training.trainer import default_model_root
+
+    requested = (model_root or default_model_root()).expanduser().resolve()
+    root = requested.parent if requested.suffix.casefold() == ".keras" else requested
+    config = read_json(root / "config.json", default=None)
+    if not isinstance(config, dict):
+        return None
+    architecture = config.get("training", {}).get("architecture")
+    return str(architecture) if architecture else None
+
+
+def _placement_engine(config: GenerationConfig) -> str:
+    if config.flow_engine == "placement":
+        from osumapper.training.placement_learning import placement_architecture
+
+        return placement_architecture(config.placement_model)
+    if config.flow_engine in {"auto", "deterministic"}:
+        return "pattern-planner-v1"
+    return "legacy-gan-flow"
+
+
+def _full_set_limitations(rhythm_architecture: str | None, placement_engine: str) -> list[str]:
+    """Describe what the models used for this package do and do not claim."""
+
+    limitations: list[str] = []
+    if rhythm_architecture in _NESTED_RHYTHM_ARCHITECTURES:
+        limitations.append(
+            f"{rhythm_architecture} constrains tier probabilities to be monotonically nested, "
+            "but each difficulty is still generated in a separate inference pass; one-pass "
+            "shared full-set inference is not implemented."
+        )
+    else:
+        limitations.append(
+            f"{rhythm_architecture or 'The selected rhythm model'} runs each difficulty "
+            "independently and does not constrain cross-tier nesting; that requires "
+            "conformer-v6."
+        )
+    if placement_engine.startswith("placement-v2"):
+        limitations.append(
+            "Placement-v2 predicts flow, object types, slider geometry, repeats, and combos "
+            "from curated human maps, but hitsound planning and learned musical-section "
+            "planning are not trained."
+        )
+    elif placement_engine.startswith("placement-v1"):
+        limitations.append(
+            "Placement-v1 predicts flow and object types without difficulty conditioning or "
+            "absolute-position anchoring; Placement-v2 supersedes it."
+        )
+    else:
+        limitations.append(
+            "PatternPlanner-v1 is deterministic and timing-aware, but learned Placement-v2, "
+            "hitsound planning, and learned section-aware pattern planning are not used here."
+        )
+    return limitations
 
 
 def _next_plateau_threshold(current: float, target_stars: float, actual_stars: float) -> float:
@@ -715,6 +776,7 @@ def _write_full_set_reports(
     reports: dict[str, dict[str, Any]],
     progress: Progress,
     star_calculator: StandardStarCalculator,
+    base_config: GenerationConfig,
 ) -> None:
     timing_sections = {
         tuple(result.document.sections().get("TimingPoints", [])) for result in results
@@ -756,6 +818,8 @@ def _write_full_set_reports(
             }
         )
     errors = [row["star_error"] for row in difficulty_rows]
+    rhythm_architecture = _rhythm_architecture(base_config.modern_model)
+    placement_engine = _placement_engine(base_config)
     set_report = {
         "version": 1,
         "generator": "full-set-v1",
@@ -767,8 +831,11 @@ def _write_full_set_reports(
         "complete": len(results) == len(STANDARD_DIFFICULTIES),
         "shared_audio_analysis": True,
         "identical_timing_sections": len(timing_sections) == 1,
-        "difficulty_nesting_enforced": False,
-        "pattern_planner": "pattern-planner-v1"
+        "rhythm_architecture": rhythm_architecture,
+        "difficulty_nesting_enforced": rhythm_architecture in _NESTED_RHYTHM_ARCHITECTURES,
+        "one_pass_full_set_inference": False,
+        "placement_engine": placement_engine,
+        "pattern_planner": placement_engine
         if all("pattern_summary" in report for report in reports.values())
         else None,
         "mean_star_error": sum(errors) / len(errors),
@@ -791,12 +858,11 @@ def _write_full_set_reports(
         },
         "difficulty_results": difficulty_rows,
         "rankability": "not-rankable-generated-draft",
-        "next_model_milestones": ["conformer-v6-nested-full-set", "placement-v2"],
-        "limitations": [
-            "V4 runs each difficulty independently; learned cross-tier nesting requires V5.",
-            "PatternPlanner-v1 is deterministic and timing-aware, but learned Placement-v2, "
-            "hitsound planning, and learned section-aware pattern planning are not yet trained.",
+        "next_model_milestones": [
+            "one-pass-shared-full-set-inference",
+            "learned-hitsound-and-section-planning",
         ],
+        "limitations": _full_set_limitations(rhythm_architecture, placement_engine),
     }
     report_path = output.with_name(f"{output.stem}.full-set.json")
     write_json(report_path, set_report)
@@ -1023,6 +1089,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
             full_set_reports,
             progress,
             star_calculator,
+            config,
         )
     elif criteria_report is not None:
         report_path = output.with_name(f"{output.stem}.criteria.json")

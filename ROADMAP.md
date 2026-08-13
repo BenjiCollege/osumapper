@@ -36,9 +36,12 @@ do not permit generative tooling for ranking-bound objects, timing, or hitsounds
   explicit-map input, deterministic preview fallback, and usable combo colours.
 - Per-tier criteria reports plus a set-level machine-readable quality report.
 
-FullSet-v1 deliberately uses independent V4 passes. It provides the product and
-validation boundary needed to measure V5 honestly; it does not claim learned
-cross-tier nesting, section planning, or Placement-v2 quality.
+FullSet-v1 deliberately uses independent per-tier passes. It provides the product
+and validation boundary needed to measure a new rhythm or placement model
+honestly; it does not by itself claim one-pass shared inference, section planning,
+or measured placement quality. The per-package quality report names the rhythm
+architecture and placement engine that actually produced it, so its stated
+limitations follow the models used rather than a fixed sentence.
 
 ## Phase 2 — Curated training data (prototype established)
 
@@ -72,10 +75,19 @@ Frozen MERT features are an optional controlled ablation after the core V5 resul
 The initial implementation covers the shared difficulty-independent encoder, six
 tier-specific rhythm heads, larger Expert heads, tier-weighted loss, deterministic
 window shards, and expanded ±20/±35 ms/per-tier evaluation. One-pass full-set
-inference, cross-tier nesting, auxiliary musical targets, and controlled V4/V5
-human A/B review remain open and are not claimed by the prototype.
+inference, auxiliary musical targets, and controlled V4/V5 human A/B review remain
+open and are not claimed by the prototype.
 
-## Phase 4 — Placement-v2
+Conformer-v6 closes the cross-tier nesting item architecturally: a multi-scale
+audio stem feeds six heads whose logits accumulate non-negative increments, so a
+timestamp's probability cannot fall as the requested tier and target stars move
+from Easy toward Expert+, and a hard-negative focal objective concentrates
+learning on confident false positives and missed events. Each tier is still
+generated in its own inference pass, so the full-set quality report records
+`one_pass_full_set_inference: false`. V6 advances only by beating frozen V5 on the
+same split and review rubric.
+
+## Phase 4 — Placement-v2 (architecture implemented, unvalidated)
 
 - Predict relative jump distance/direction and long-range pattern continuation.
 - Predict circles, sliders, spinners, slider geometry/duration/repeats, and combos.
@@ -83,6 +95,21 @@ human A/B review remain open and are not claimed by the prototype.
   slider patterns.
 - Keep off-screen geometry, duplicate ticks, impossible gaps, and other hard rules
   in deterministic post-processing.
+
+The implemented model conditions every prediction on the requested tier and target
+star rating, adds measure-level musical context, predicts absolute playfield
+position alongside the relative step, and predicts slider repeats and hold length.
+Reconstruction anchors direction to the predicted absolute position while
+preserving the calibrated step distance, rotates to the nearest legal direction
+instead of shortening jumps at the playfield edge, and emits repeats only when the
+traversal fits before the next object. A five-block Conformer encoder replaces the
+three plain attention blocks, and the objective is rebalanced with Huber terms,
+class-weighted object types, and a positive-weighted combo loss.
+
+Long-range pattern continuation, learned overlap and anchor structure, and
+non-linear slider geometry are still open. Placement-v2 advances only by beating
+Placement-v1 and PatternPlanner-v1 on the frozen test split and in human review;
+the version number alone is not evidence.
 
 ## Phase 5 — Complete arrangement and polish
 

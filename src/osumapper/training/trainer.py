@@ -46,7 +46,7 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
     return [index + 1 for index, value in enumerate(history.get("loss", [])) if float(value) <= 0.0]
 
 
-def default_model_root(architecture: str = "conformer-v4") -> Path:
+def default_model_root(architecture: str = "conformer-v6") -> Path:
     name = {
         "conformer-v6": "rhythm-conformer-v6-full-set",
         "conformer-v5": "rhythm-conformer-v5-full-set",

@@ -88,6 +88,32 @@ class BeatmapTests(unittest.TestCase):
         self.assertEqual(circle.split(",")[3], "5")
         self.assertEqual(slider.split(",")[3], "6")
 
+    def test_slider_repeats_emit_matching_edge_sounds_and_sample_sets(self) -> None:
+        plain = serialize_hit_object(
+            {
+                "x": 256,
+                "y": 192,
+                "time": 1_000,
+                "type": 2,
+                "sliderGenerator": {"endpoint": [384, 192], "len": 128},
+            }
+        )
+        repeated = serialize_hit_object(
+            {
+                "x": 256,
+                "y": 192,
+                "time": 1_000,
+                "type": 2,
+                "sliderGenerator": {"endpoint": [384, 192], "len": 128, "repeats": 3},
+            }
+        )
+        fields = repeated.split(",")
+
+        self.assertEqual(plain.split(",")[6], "1")
+        self.assertEqual(fields[6], "3")
+        self.assertEqual(fields[8], "0|0|0|0")
+        self.assertEqual(fields[9], "0:0|0:0|0:0|0:0")
+
     def test_standard_objects_are_clamped_inside_the_visible_playfield(self) -> None:
         document = BeatmapDocument.read(FIXTURES / "standard.osu")
         updated = document.with_hit_objects(

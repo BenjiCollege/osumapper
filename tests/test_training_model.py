@@ -24,7 +24,14 @@ from osumapper.training.features import extract_dataset_features
 from osumapper.training.loader import iter_windows, summarize_loader
 from osumapper.training.model import build_rhythm_model, load_rhythm_model
 from osumapper.training.placement import analyze_placement
-from osumapper.training.placement_learning import build_placement_model, predict_placement
+from osumapper.training.placement_learning import (
+    PLACEMENT_V2_FEATURE_DIMENSION,
+    PLACEMENT_V2_TARGET_DIMENSION,
+    _reconstruct_v2,
+    build_placement_model,
+    placement_architecture,
+    predict_placement,
+)
 from osumapper.training.splits import load_split, split_dataset
 from osumapper.training.storage import read_json, write_json
 from osumapper.training.trainer import historical_empty_epochs, train_rhythm
@@ -252,6 +259,7 @@ class TrainingModelTests(unittest.TestCase):
                 sequence_length=16,
                 learning_rate=1e-3,
                 jit_compile=False,
+                architecture="placement-v1",
             )
             inputs = np.zeros((1, 16, 11), dtype=np.float32)
             inputs[0, :4, 6] = 0.2
@@ -266,7 +274,7 @@ class TrainingModelTests(unittest.TestCase):
             model.save(destination)
             write_json(
                 Path(name) / "config.json",
-                {"training": {"sequence_length": 16}},
+                {"architecture": "placement-v1", "training": {"sequence_length": 16}},
             )
             loaded = load_rhythm_model(destination, compile_model=False)
             reloaded = loaded.predict(inputs, verbose=0)
@@ -279,11 +287,97 @@ class TrainingModelTests(unittest.TestCase):
             )
 
             self.assertEqual(model.name, "osumapper_placement_v1")
+            self.assertEqual(placement_architecture(destination), "placement-v1")
             self.assertTrue(np.isfinite(loss))
             self.assertEqual(prediction.shape, (1, 16, 8))
             self.assertEqual(len(placed), 4)
             self.assertTrue(all(0 <= obj["x"] <= 512 and 0 <= obj["y"] <= 384 for obj in placed))
             np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
+
+    def test_placement_v2_is_the_default_and_reconstructs_legal_objects(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            model = build_placement_model(
+                sequence_length=16,
+                learning_rate=1e-3,
+                jit_compile=False,
+                model_dimension=24,
+                blocks=1,
+                attention_heads=4,
+            )
+            inputs = np.zeros((1, 16, PLACEMENT_V2_FEATURE_DIMENSION), dtype=np.float32)
+            inputs[0, :4, 11] = 1.0
+            targets = np.zeros((1, 16, PLACEMENT_V2_TARGET_DIMENSION), dtype=np.float32)
+            targets[0, :4, 2] = 1.0
+            targets[0, :4, 4] = 1.0
+            targets[0, :4, 8] = 0.5
+            targets[0, :4, 9] = 0.5
+            weights = np.zeros((1, 16), dtype=np.float32)
+            weights[0, :4] = 1.0
+            loss = model.train_on_batch(inputs, targets, sample_weight=weights)
+            prediction = model.predict(inputs, verbose=0)
+            destination = Path(name) / "placement.keras"
+            model.save(destination)
+            write_json(
+                Path(name) / "config.json",
+                {"architecture": "placement-v2", "training": {"sequence_length": 16}},
+            )
+            timestamps = np.asarray([500, 1_000, 1_500, 2_500])
+            document = BeatmapDocument.read(FIXTURES / "standard.osu")
+            placed = predict_placement(
+                document,
+                timestamps,
+                model_root=destination,
+                target_density=2.0,
+                seed=2026,
+                difficulty_tier="expert",
+                target_stars=5.9,
+            )
+
+            self.assertEqual(model.name, "osumapper_placement_v2")
+            self.assertEqual(placement_architecture(destination), "placement-v2")
+            self.assertTrue(np.isfinite(loss))
+            self.assertEqual(prediction.shape, (1, 16, PLACEMENT_V2_TARGET_DIMENSION))
+            self.assertEqual(len(placed), 4)
+            self.assertTrue(all(0 <= obj["x"] <= 512 and 0 <= obj["y"] <= 384 for obj in placed))
+            self.assertEqual(
+                [obj["time"] for obj in placed], [int(value) for value in timestamps]
+            )
+
+    def test_placement_v2_spacing_follows_the_calibrated_flow_scale(self) -> None:
+        # Full-set star calibration tunes spacing while the rhythm is locked, so a
+        # scale change must move the realised distances by the same factor.
+        count = 8
+        predicted = np.zeros((count, PLACEMENT_V2_TARGET_DIMENSION), dtype=np.float32)
+        predicted[:, 0] = 0.15
+        predicted[:, 2] = 1.0
+        predicted[:, 3] = 1.0
+        predicted[:, 8] = 0.5
+        predicted[:, 9] = 0.5
+        timestamps = [500.0 + index * 300.0 for index in range(count)]
+
+        def spacing(scale: float) -> float:
+            objects = _reconstruct_v2(
+                timestamps,
+                predicted,
+                beat_lengths=[600.0] * count,
+                slider_lengths=[100.0] * count,
+                margin=36.0,
+                flow_scale=scale,
+                seed=2026,
+            )
+            return sum(
+                math.hypot(
+                    float(objects[index]["x"]) - float(objects[index - 1]["x"]),
+                    float(objects[index]["y"]) - float(objects[index - 1]["y"]),
+                )
+                for index in range(1, count)
+            )
+
+        single = spacing(1.0)
+        doubled = spacing(2.0)
+
+        self.assertAlmostEqual(single, 0.15 * 640.0 * (count - 1), delta=1.0)
+        self.assertAlmostEqual(doubled / single, 2.0, delta=0.05)
 
     def test_loader_training_and_held_out_evaluation_smoke(self) -> None:
         with tempfile.TemporaryDirectory() as name:
