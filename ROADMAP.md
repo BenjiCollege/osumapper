@@ -87,7 +87,7 @@ generated in its own inference pass, so the full-set quality report records
 `one_pass_full_set_inference: false`. V6 advances only by beating frozen V5 on the
 same split and review rubric.
 
-## Phase 4 — Placement-v2 (architecture implemented, unvalidated)
+## Phase 4 — Placement (v4 current, measured against v1/v2/v3)
 
 - Predict relative jump distance/direction and long-range pattern continuation.
 - Predict circles, sliders, spinners, slider geometry/duration/repeats, and combos.
@@ -108,9 +108,10 @@ class-weighted object types, and a positive-weighted combo loss.
 
 ### Measured result, 66 held-out test songs, seed 2026
 
-All three placement architectures were trained on the same frozen split with the
-same schedule and seed, so the differences are attributable to architecture and
-objective only.
+Every placement architecture was trained on the same frozen split with the same
+schedule and seed, so the differences are attributable to architecture and
+objective only. Placement-v4 supersedes v3; its distance comparison is reported
+under Phase 4b because average error is the wrong acceptance metric for it.
 
 | metric | v1 | v2 | v3 |
 |---|---:|---:|---:|
@@ -133,6 +134,40 @@ non-linear slider geometry are still open. A promoted placement model must beat
 its predecessors and PatternPlanner-v1 on the frozen test split **and** in human
 review; the version number alone is not evidence, and no human A/B review has
 been run yet.
+
+### Resolved since the first full-set measurement
+
+- **Slider and spinner tails were unsnapped** (508 occurrences across six
+  difficulties, up to 71% of holds on a tier). Object starts were always snapped;
+  only ends drifted, because their duration came from a continuous predicted
+  pixel length. Reconstruction now snaps the duration to an editor division and
+  derives the length from it. Now zero.
+- **Placement was conditioned on the wrong density.** Training uses each map's
+  real objects/second; generation passed the tier's nominal target, which
+  measured about 0.6x the median human density of that tier. Tier targets are now
+  the measured medians, and inference derives density from the timestamps being
+  placed.
+- **Generated sets bought stars with spacing.** Expert+ reached its target with
+  1,142 objects at 95% jumps and 238px median spacing, against a human map using
+  1,590 objects at 50px. With correct densities it now uses 1,560 objects at 61px.
+- **No generated map contained a stack**, on any tier, in any version through v3.
+  Placement-v4's mixture density head reproduces the human stacking rate.
+- **Short sliders were impossible at Expert+ density.** Reconstruction refused any
+  slider under 35px, but at 8 objects/second the median gap allows 0.42 beats
+  while a 35px slider at that song's velocity needs 0.50, so 31 of 200 predicted
+  sliders became circles. Across 28,180 sliders in dense human Expert+ maps, p1 is
+  23.8px and only 3.0% fall under 35px, so the floor is now 20px. Note the
+  measurement that prompted this also retired the claim that the type head is
+  biased: conditioned on density, human Expert+ slider use falls from 32.4% at
+  4.5-6/s to 15.6% at 7.5-9/s, and the model predicts 12.8% at 8.1/s. The
+  apparent 13-point gap came from comparing against one atypical mapset rather
+  than the density-conditioned population.
+- **Stream notes were pruned preferentially.** They carry lower predicted
+  probability than isolated notes (0.800 against 0.832), so one flat per-tier
+  cutoff removed them first: stream recall trailed non-stream recall by 0.25 on
+  Insane. Selection now applies hysteresis, admitting a lower-confidence candidate
+  only where it continues an already-selected run. The continuation ratio was
+  chosen by sweep as the strongest setting costing no F1.
 
 ### Known quality gaps in generated full sets
 

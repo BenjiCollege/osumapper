@@ -23,7 +23,8 @@ establishes the six-map packaging and validation boundary using Conformer-v4.
 Conformer-v5 added one shared music encoder with six tier-specific rhythm heads,
 and Conformer-v6 constrains those heads to be monotonically nested. Placement-v2
 adds difficulty-conditioned, position-anchored learned placement, superseded by
-Placement-v3. One-pass
+Placement-v4, whose mixture density distance head restores the stacks a
+point estimate cannot express. One-pass
 full-set inference, auxiliary section heads, and hitsound planning remain research
 milestones. See [`ROADMAP.md`](ROADMAP.md) for the phased quality plan and release
 gates.
@@ -223,7 +224,7 @@ Hard favor readability, near-stacks, and more sliders. Expert and Expert+ permit
 larger movement, tighter streams, and sparse exact stacks. The planner never adds
 rhythm timestamps: timing precision remains the responsibility of Conformer-v4,
 and star calibration plus the criteria audit still gate export. This is a bounded
-heuristic placement system and remains the default; the learned Placement-v3
+heuristic placement system and remains the default; the learned Placement-v4
 alternative is selected with `--flow-engine placement`. Every map still requires
 listening, test play, and human editing.
 
@@ -307,8 +308,8 @@ the complete `rhythm-conformer-v5-curated-run1-seed-2026` until that folder hold
 both `model.keras` and `config.json`. It also defaults to deterministic
 PatternPlanner, complete six-difficulty generation, the installed-lazer star
 calculator, seed 2026, and ±0.03★ precision. Learned placement remains optional
-and follows the same rule: `placement-v3` is selected once trained, otherwise
-`placement-v2`, and choosing it requires a real `model.keras` plus `config.json`.
+and follows the same rule: `placement-v4` is selected once trained, otherwise
+`placement-v3`, and choosing it requires a real `model.keras` plus `config.json`.
 
 **Import completed packages into osu!lazer** is deliberately disabled by default.
 Importing a local package must not be treated as a filename- or title-based
@@ -321,7 +322,7 @@ not passed to generation.
 
 The **Training lab** tab provides safe `.osz` ingestion, explicit GOOD-map
 curation, scan/statistics/split/feature/window controls, Conformer-v6 and
-Placement-v3 GPU training, calibration, held-out evaluation, review packages,
+Placement-v4 GPU training, calibration, held-out evaluation, review packages,
 and placement analysis. Both sides scroll independently on smaller screens. The
 **Activity** tab keeps detailed process output and actionable errors.
 
@@ -1043,7 +1044,7 @@ changes the decision threshold rather than probability ranking.
 Five deterministic review packages from this baseline are available locally at
 `output/held-out-review-transformer-v1/` with their exact source-map manifest.
 
-### 5. Train Placement-v3 and analyze flow
+### 5. Train Placement-v4 and analyze flow
 
 Rhythm decides *when* objects occur; placement decides *where* and *what*. It is
 kept as a separate model so a rhythm architecture can be evaluated before
@@ -1084,7 +1085,7 @@ trains both architectures at batch 2 with a different sequence length.
   not swamped by circles; a positive-weighted combo loss; and a unit-norm
   regulariser that keeps the turn head on the circle.
 
-**Placement-v3** is the current architecture. It shares V2's encoder, features,
+**Placement-v3** shares V2's encoder, features,
 and targets, and changes only what the measured V1/V2 comparison indicted. On 66
 held-out test songs, all three trained on the same frozen split with the same
 schedule and seed:
@@ -1117,13 +1118,53 @@ reads as bland even when it scores well. Predicting a spacing distribution and
 sampling from it would score worse on MAE while plausibly producing better maps,
 and needs a different acceptance metric before it can be judged.
 
+**Placement-v4** is the current architecture. It keeps V3's encoder, features,
+and objective, and replaces only the distance head.
+
+Every earlier version emitted **zero stacks**, on every tier, on every song. The
+cause is not a threshold but the loss: any average-error objective is minimised
+by the conditional mean, and a stack (under 8px) and a jump (over 160px) sit on
+opposite sides of that mean, so a point estimate can never commit to either.
+Lowering the reconstruction floor did not help, because the model never predicted
+a small distance in the first place.
+
+V4 predicts a four-component Gaussian mixture over normalized distance, trained
+by negative log-likelihood, and generation samples it using the run seed so the
+same seed still reproduces the same map. Output slots 0-11 keep their V2/V3
+meaning with slot 0 carrying the mixture's expected value, so every other head's
+loss term and every existing metric stay directly comparable; the mixture
+parameters occupy slots 12-23.
+
+Judged on distribution shape rather than average error, over the same held-out
+split:
+
+| model | jump distance MAE | stack rate | jump rate | spread | distance to human |
+|---|---:|---:|---:|---:|---:|
+| human | - | 9.17% | 36.33% | 93.4 px | - |
+| v1 | 50.85 px | 0.00% | 42.52% | 72.7 px | 23.17 px |
+| v2 | 53.84 px | 0.00% | 46.73% | 67.9 px | 25.94 px |
+| v3 | **48.09 px** | 0.00% | 45.41% | 71.2 px | 24.00 px |
+| v4 | 58.12 px | **8.64%** | **38.05%** | **96.2 px** | **5.51 px** |
+
+The final column is the first Wasserstein distance between the predicted and
+human spacing distributions. V4's MAE is deliberately worse: sampling departs
+from the mean, and MAE measures departure from the mean. MAE is therefore not the
+acceptance metric for the distance head, and the distribution columns are. Choose
+the acceptance metric before running the comparison, not after seeing it.
+
+Stacks interact with the ranking criteria. Two consecutive objects on identical
+coordinates within one beat are an error on Easy and Normal, within half a beat
+on Hard, and only a guideline from Insane upward. Reconstruction therefore gives
+the lower tiers a readable 7px near-stack and lets Insane and above stack
+exactly, matching both the criteria and human practice.
+
 Train it on the RTX 4070 after the rated-only split is stable:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
   --data-root "$HOME/osumapper/training_data" \
-  --output "$HOME/osumapper/models/modern/placement-v3-rated-seed-2026" \
-  --architecture placement-v3 \
+  --output "$HOME/osumapper/models/modern/placement-v4-rated-seed-2026" \
+  --architecture placement-v4 \
   --model-dimension 192 --blocks 5 --attention-heads 6 --dropout 0.15 \
   --epochs 75 \
   --batch-size 32 \
@@ -1137,7 +1178,8 @@ CUDA_VISIBLE_DEVICES=0 uv run --extra gpu osumapper train placement \
   --seed 2026
 ```
 
-`--architecture placement-v1|placement-v2|placement-v3` selects the objective;
+`--architecture placement-v1|placement-v2|placement-v3|placement-v4` selects the
+objective;
 `--model-dimension` must divide evenly by `--attention-heads`. Raising the width
 and block count increases capacity and VRAM use; keep the frozen split and start
 a separately named run whenever either changes, because `--resume` deliberately
@@ -1150,7 +1192,7 @@ test songs:
 ```bash
 uv run --extra gpu osumapper train evaluate placement \
   --data-root "$HOME/osumapper/training_data" \
-  --model "$HOME/osumapper/models/modern/placement-v3-rated-seed-2026"
+  --model "$HOME/osumapper/models/modern/placement-v4-rated-seed-2026"
 ```
 
 Placement inference constrains generated objects and slider endpoints to the
@@ -1176,7 +1218,7 @@ measure obvious flow/playability problems; they are not proof of map quality.
 Preserve and evaluate the completed V4 benchmark first. Curate GOOD-only maps,
 then train Conformer-v6 with its shared multi-scale encoder, six monotonically
 nested tier heads, Expert and Expert+ capacity, hard-negative focal training, and
-per-tier calibration. Train Placement-v3 on the same frozen split once rhythm
+per-tier calibration. Train Placement-v4 on the same frozen split once rhythm
 wins, and compare it against its predecessors and PatternPlanner-v1 on held-out
 songs before making it the generation default. Optional frozen MERT features are
 an ablation only after those controlled baselines are stable. The complete
@@ -1212,7 +1254,7 @@ uv run --extra gpu osumapper generate song.osz \
   --rhythm-engine modern \
   --modern-model "$HOME/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026" \
   --flow-engine placement \
-  --placement-model "$HOME/osumapper/models/modern/placement-v3-rated-seed-2026" \
+  --placement-model "$HOME/osumapper/models/modern/placement-v4-rated-seed-2026" \
   --difficulty-tier expert \
   --seed 2026 \
   --open
@@ -1367,7 +1409,8 @@ models/modern/rhythm-conformer-v3/  Faster isolated Conformer-v3 output
 models/modern/rhythm-conformer-v4-standard-stars/  Standard star-conditioned V4 output
 models/modern/placement-v1/         Original learned flow/object-type output
 models/modern/placement-v2/         Difficulty-conditioned placement output
-models/modern/placement-v3/         Current placement output
+models/modern/placement-v3/         Squared-distance placement output
+models/modern/placement-v4/         Current mixture-density placement output
 training_data/           Ignored metadata, imports, splits, features, and window shards
 tests/                   Fixtures, golden outputs, and regression tests
 legacy/                  Preservation and compatibility documentation

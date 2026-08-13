@@ -50,6 +50,12 @@ _STACK_DISTANCE_PX = 8.0
 # A readable near-stack: far enough that serialized integer coordinates differ,
 # close enough to still play as a stack. Matches PatternPlanner-v1's choice.
 _NEAR_STACK_PX = 7.0
+# Shortest slider reconstruction will emit. Measured across 28,180 sliders in
+# dense (6+ objects/second) human Expert+ maps: p1 is 23.8px and only 3.0% fall
+# under 35px. A 35px floor therefore rejected legitimate short sliders, which at
+# high density is where most of them live -- it dropped 31 of 200 predicted
+# sliders on a single Expert+ generation.
+_MINIMUM_SLIDER_PX = 20.0
 # Consecutive objects on identical coordinates within this many beats are a
 # ranking error on these tiers; Insane and above downgrade it to a guideline.
 _OVERLAP_BEAT_LIMITS = {"easy": 1.0, "normal": 1.0, "hard": 0.5}
@@ -1584,13 +1590,13 @@ def _reconstruct_v2(
                     desired_length / velocity,
                     available_ms / beat_ms / repeats,
                     _SLIDER_BEAT_DIVISIONS,
-                    minimum_beats=35.0 / velocity,
+                    minimum_beats=_MINIMUM_SLIDER_PX / velocity,
                 )
                 if beats:
                     break
                 repeats -= 1
             length = beats * velocity
-            if beats and length >= 35.0:
+            if beats and length >= _MINIMUM_SLIDER_PX:
                 end_x, end_y = _place_at_distance(x, y, phase, length, margin)
                 obj.update(
                     {

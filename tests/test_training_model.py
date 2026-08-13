@@ -484,6 +484,39 @@ class TrainingModelTests(unittest.TestCase):
         self.assertEqual(stack_ratio(0), 0.0)
         self.assertGreater(stack_ratio(K), 0.3)
 
+    def test_short_sliders_survive_dense_expert_rhythm(self) -> None:
+        # At Expert+ density the gap between objects is a fraction of a beat, so
+        # a high minimum slider length silently converts predicted sliders into
+        # circles. Real dense Expert+ sliders reach down to ~24px, so a 125ms gap
+        # at 250ms/beat and 70px/beat velocity must still be able to hold one.
+        count = 24
+        beat_ms = 250.0
+        predicted = np.zeros((count, PLACEMENT_V2_TARGET_DIMENSION), dtype=np.float32)
+        predicted[:, 0] = 0.1
+        predicted[:, 2] = 1.0
+        predicted[:, 4] = 1.0  # every object predicted as a slider
+        predicted[:, 6] = 0.05
+        predicted[:, 8] = 0.5
+        predicted[:, 9] = 0.5
+        timestamps = [1_000.0 + index * 125.0 for index in range(count)]
+
+        objects = _reconstruct_v2(
+            timestamps,
+            predicted,
+            beat_lengths=[beat_ms] * count,
+            slider_lengths=[70.0] * count,
+            margin=36.0,
+            flow_scale=1.0,
+            seed=2026,
+        )
+
+        sliders = [obj for obj in objects if int(obj["type"]) & 2]
+        self.assertGreater(len(sliders) / count, 0.5)
+        for obj in sliders:
+            generator = obj["sliderGenerator"]
+            duration_ms = generator["len"] / 70.0 * beat_ms * generator["repeats"]
+            self.assertLessEqual(duration_ms, 125.0 - _MINIMUM_OBJECT_GAP_MS + 1e-6)
+
     def test_placement_is_conditioned_on_the_density_it_actually_places(self) -> None:
         # Training conditions each window on its map's real objects_per_second.
         # Passing a tier's nominal target instead understated density by ~40%.
