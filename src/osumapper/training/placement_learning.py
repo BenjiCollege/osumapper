@@ -26,12 +26,33 @@ from osumapper.training.splits import load_split
 from osumapper.training.storage import read_json, write_json
 from osumapper.training.trainer import _configure_device, _jit_compile, _safe_output
 
-PLACEMENT_ARCHITECTURES = ("placement-v1", "placement-v2", "placement-v3")
-DEFAULT_PLACEMENT_ARCHITECTURE = "placement-v3"
-# v2 and v3 share an encoder, feature set, and target set; they differ only in how
-# the loss is balanced and how far reconstruction trusts the position head.
-_V2_FAMILY = {"placement-v2", "placement-v3"}
-_MODEL_VERSIONS = {"placement-v1": 1, "placement-v2": 2, "placement-v3": 3}
+PLACEMENT_ARCHITECTURES = ("placement-v1", "placement-v2", "placement-v3", "placement-v4")
+DEFAULT_PLACEMENT_ARCHITECTURE = "placement-v4"
+# v2, v3, and v4 share an encoder and feature set. v2/v3 differ only in loss
+# balance; v4 additionally replaces the point-estimate distance head with a
+# mixture density head, which extends the target vector.
+_V2_FAMILY = {"placement-v2", "placement-v3", "placement-v4"}
+_MODEL_VERSIONS = {
+    "placement-v1": 1,
+    "placement-v2": 2,
+    "placement-v3": 3,
+    "placement-v4": 4,
+}
+
+# A point estimate trained on any average-error loss converges to the conditional
+# mean, so it can never emit a stack (under 8px) or a genuine long jump: those are
+# minority modes either side of the average. v4 predicts a K-component mixture
+# over normalized distance instead and samples from it with the run seed, so the
+# rate of stacks and jumps follows the learned distribution rather than its mean.
+PLACEMENT_MIXTURE_COMPONENTS = 4
+_MIXTURE_MINIMUM_SCALE = 0.01
+_STACK_DISTANCE_PX = 8.0
+# A readable near-stack: far enough that serialized integer coordinates differ,
+# close enough to still play as a stack. Matches PatternPlanner-v1's choice.
+_NEAR_STACK_PX = 7.0
+# Consecutive objects on identical coordinates within this many beats are a
+# ranking error on these tiers; Insane and above downgrade it to a guideline.
+_OVERLAP_BEAT_LIMITS = {"easy": 1.0, "normal": 1.0, "hard": 0.5}
 
 PLACEMENT_FEATURE_DIMENSION = 11
 PLACEMENT_TARGET_DIMENSION = 8
@@ -54,9 +75,71 @@ PLAYFIELD_HEIGHT = 384.0
 _ABSOLUTE_ANCHOR_WEIGHT = 0.3
 # The position head only reached ~99px MAE on held-out songs, so v3 leans on it
 # less: it is useful for stopping long-run drift, not for dictating each step.
-_ANCHOR_WEIGHTS = {"placement-v2": 0.3, "placement-v3": 0.15}
-_MINIMUM_JUMP_PX = 12.0
+_ANCHOR_WEIGHTS = {"placement-v2": 0.3, "placement-v3": 0.15, "placement-v4": 0.15}
+# Human maps stack 4-15% of transitions, and a stack is under 8px. A 12px floor
+# made stacks structurally impossible, so generated maps contained exactly zero.
+_MINIMUM_JUMP_PX = 0.0
 _MAXIMUM_JUMP_PX = 420.0
+_MINIMUM_OBJECT_GAP_MS = 20.0
+# Editor snap divisions, longest first. A hold whose duration is one of these
+# beat fractions ends on the same grid its start was chosen from.
+_SLIDER_BEAT_DIVISIONS = (4.0, 3.0, 2.0, 1.5, 1.0, 0.75, 0.5, 1.0 / 3.0, 0.375, 0.25, 0.125)
+_SPINNER_BEAT_DIVISIONS = (16.0, 12.0, 8.0, 6.0, 4.0, 3.0, 2.0, 1.0)
+
+
+def _resolved_profile(difficulty_tier: str | None, target_stars: float | None) -> Any:
+    """Resolve the tier used for both conditioning and criteria-safe geometry.
+
+    Falls back to the same neutral mid difficulty PatternPlanner-v1 uses, so an
+    unconditioned request still produces a coherent layout instead of an
+    arbitrary one-hot.
+    """
+
+    if difficulty_tier is not None:
+        return standard_difficulty(difficulty_tier)
+    if target_stars is not None:
+        return difficulty_for_stars(float(target_stars))
+    return standard_difficulty("hard")
+
+
+def realized_density(timestamps: list[float], fallback: float) -> float:
+    """Objects per second of the sequence actually being placed.
+
+    Training conditions every window on its own map's `objects_per_second`, so
+    inference has to supply the same quantity. Generation previously passed the
+    tier's nominal target density, which measures about 0.6x the median human
+    density of that tier, telling the model the map was far sparser than the one
+    being built and biasing it toward slider-heavy output.
+    """
+
+    if len(timestamps) < 2:
+        return fallback
+    span_seconds = (max(timestamps) - min(timestamps)) / 1000.0
+    if span_seconds <= 0.0:
+        return fallback
+    return max(0.1, min(20.0, len(timestamps) / span_seconds))
+
+
+def _snapped_hold_beats(
+    desired_beats: float,
+    available_beats: float,
+    divisions: tuple[float, ...],
+    *,
+    minimum_beats: float,
+) -> float:
+    """Pick the editor-snapped duration closest to what the model asked for.
+
+    Returns 0.0 when nothing fits, which the caller treats as "not a hold".
+    """
+
+    feasible = [
+        value
+        for value in divisions
+        if value <= available_beats and value >= minimum_beats and value > 0.0
+    ]
+    if not feasible:
+        return 0.0
+    return min(feasible, key=lambda value: abs(value - desired_beats))
 
 
 def placement_architecture(model_root: Path | None) -> str:
@@ -468,11 +551,13 @@ def _placement_v2_loss(keras: Any, **overrides: Any) -> Any:
             combo_positive_weight: float = 3.0,
             kind_class_weights: tuple[float, float, float] = (1.0, 1.25, 6.0),
             squared_distance: bool = False,
+            mixture_components: int = 0,
             name: str = "placement_v2_loss",
             **kwargs: Any,
         ) -> None:
             super().__init__(name=name, **kwargs)
             self.squared_distance = bool(squared_distance)
+            self.mixture_components = int(mixture_components)
             self.distance_weight = float(distance_weight)
             self.turn_weight = float(turn_weight)
             self.kind_weight = float(kind_weight)
@@ -496,12 +581,28 @@ def _placement_v2_loss(keras: Any, **overrides: Any) -> Any:
         def call(self, y_true: Any, y_pred: Any) -> Any:
             ops = keras.ops
             actual = ops.cast(y_true, y_pred.dtype)
-            distance_error = actual[..., 0] - y_pred[..., 0]
-            distance = (
-                ops.square(distance_error)
-                if self.squared_distance
-                else self._huber(ops, distance_error, 0.05)
-            )
+            if self.mixture_components:
+                count = self.mixture_components
+                weights = y_pred[..., 12 : 12 + count]
+                means = y_pred[..., 12 + count : 12 + 2 * count]
+                scales = y_pred[..., 12 + 2 * count : 12 + 3 * count]
+                target = ops.expand_dims(actual[..., 0], axis=-1)
+                scales = ops.maximum(scales, 1e-3)
+                normalized = (target - means) / scales
+                log_component = (
+                    ops.log(ops.maximum(weights, 1e-8))
+                    - ops.log(scales)
+                    - 0.5 * ops.square(normalized)
+                    - 0.5 * math.log(2.0 * math.pi)
+                )
+                distance = -ops.logsumexp(log_component, axis=-1)
+            else:
+                distance_error = actual[..., 0] - y_pred[..., 0]
+                distance = (
+                    ops.square(distance_error)
+                    if self.squared_distance
+                    else self._huber(ops, distance_error, 0.05)
+                )
 
             true_turn = actual[..., 1:3]
             predicted_turn = y_pred[..., 1:3]
@@ -560,6 +661,7 @@ def _placement_v2_loss(keras: Any, **overrides: Any) -> Any:
                 "combo_positive_weight": self.combo_positive_weight,
                 "kind_class_weights": list(self.kind_class_weights),
                 "squared_distance": self.squared_distance,
+                "mixture_components": self.mixture_components,
             }
 
     return PlacementV2Loss(**overrides)
@@ -591,7 +693,29 @@ def _placement_v3_loss(keras: Any) -> Any:
     )
 
 
+def _placement_v4_loss(keras: Any, components: int) -> Any:
+    """Placement-v3's objective with the distance term replaced by mixture NLL.
+
+    Squared error on a point estimate is minimised by the conditional mean, which
+    is why v3 could not produce a stack: stacks and long jumps live either side of
+    the average and the average is never either. Negative log-likelihood over a
+    mixture instead rewards putting probability mass where the data actually is,
+    so the minority modes survive training and inference can sample them.
+    """
+
+    return _placement_v2_loss(
+        keras,
+        squared_distance=True,
+        distance_weight=3.0,
+        position_weight=0.25,
+        mixture_components=components,
+        name="placement_v4_loss",
+    )
+
+
 def _loss_for(keras: Any, architecture: str) -> Any:
+    if architecture == "placement-v4":
+        return _placement_v4_loss(keras, PLACEMENT_MIXTURE_COMPONENTS)
     if architecture == "placement-v3":
         return _placement_v3_loss(keras)
     if architecture == "placement-v2":
@@ -650,6 +774,7 @@ def _build_placement_v2(
     blocks: int,
     heads: int,
     dropout: float,
+    mixture_components: int = 0,
 ) -> Any:
     """Conformer-style placement encoder with per-group prediction heads.
 
@@ -747,7 +872,6 @@ def _build_placement_v2(
             units, activation=activation, dtype="float32", name=f"{name}_output"
         )(hidden)
 
-    distance = head("placement_distance", 1, "sigmoid", dimension // 2)
     turn = head("placement_turn", 2, "tanh", dimension // 2)
     kind = head("placement_kind", 3, "softmax", dimension // 2)
     slider = head("placement_slider_length", 1, "sigmoid", dimension // 4)
@@ -755,10 +879,38 @@ def _build_placement_v2(
     position = head("placement_position", 2, "sigmoid", dimension // 2)
     repeats = head("placement_repeats", 1, "sigmoid", dimension // 4)
     hold = head("placement_hold", 1, "sigmoid", dimension // 4)
+
+    extra: list[Any] = []
+    if mixture_components:
+        # Slots 0..11 keep the v2/v3 meaning so every other head's loss term and
+        # every existing metric stay directly comparable. Slot 0 carries the
+        # mixture's expected value, which is the same quantity a point-estimate
+        # head learns, and the distribution parameters follow it.
+        weights_logits = head(
+            "placement_mixture_logits", mixture_components, "linear", dimension // 2
+        )
+        means = head("placement_mixture_means", mixture_components, "sigmoid", dimension // 2)
+        scales = head("placement_mixture_scales", mixture_components, "softplus", dimension // 4)
+        scales = keras.layers.Rescaling(
+            1.0, offset=_MIXTURE_MINIMUM_SCALE, name="placement_mixture_scale_floor"
+        )(scales)
+        weights = keras.layers.Softmax(name="placement_mixture_weights")(weights_logits)
+        distance = keras.ops.sum(weights * means, axis=-1, keepdims=True)
+        distance = keras.layers.Activation(
+            "linear", dtype="float32", name="placement_distance_mean"
+        )(distance)
+        extra = [weights, means, scales]
+    else:
+        distance = head("placement_distance", 1, "sigmoid", dimension // 2)
+
     output = keras.layers.Concatenate(name="placement_output")(
-        [distance, turn, kind, slider, combo, position, repeats, hold]
+        [distance, turn, kind, slider, combo, position, repeats, hold, *extra]
     )
-    return keras.Model(inputs=inputs, outputs=output, name="osumapper_placement_v2")
+    return keras.Model(
+        inputs=inputs,
+        outputs=output,
+        name="osumapper_placement_v4" if mixture_components else "osumapper_placement_v2",
+    )
 
 
 def build_placement_model(
@@ -789,6 +941,9 @@ def build_placement_model(
             blocks=blocks,
             heads=attention_heads,
             dropout=dropout,
+            mixture_components=(
+                PLACEMENT_MIXTURE_COMPONENTS if selected == "placement-v4" else 0
+            ),
         )
     else:
         model = _build_placement_v1(keras, sequence_length=sequence_length)
@@ -1082,15 +1237,7 @@ def _v2_inference_features(
     beat_lengths, slider_lengths, meters, divisors, beat_positions = _document_timing(
         document, timestamps
     )
-    if difficulty_tier is not None:
-        profile = standard_difficulty(difficulty_tier)
-    elif target_stars is not None:
-        profile = difficulty_for_stars(float(target_stars))
-    else:
-        # Match PatternPlanner-v1's neutral fallback so an unconditioned request
-        # still produces a coherent mid-difficulty layout rather than an
-        # arbitrary one-hot.
-        profile = standard_difficulty("hard")
+    profile = _resolved_profile(difficulty_tier, target_stars)
     stars = profile.default_stars if target_stars is None else float(target_stars)
     features = _v2_features(
         timestamps,
@@ -1291,6 +1438,35 @@ def _reconstruct_v1(
     return objects
 
 
+def _sample_mixture_distances(
+    predicted: np.ndarray[Any, Any],
+    components: int,
+    seed: int,
+) -> np.ndarray[Any, Any]:
+    """Draw one normalized distance per step from the predicted mixture.
+
+    Seeded, so the same seed reproduces the same map exactly, as every other part
+    of generation does. Sampling rather than averaging is the whole point: the
+    mean of a bimodal stack/jump distribution is a medium spacing that the human
+    data almost never contains.
+    """
+
+    weights = predicted[:, 12 : 12 + components].astype(np.float64)
+    means = predicted[:, 12 + components : 12 + 2 * components].astype(np.float64)
+    scales = predicted[:, 12 + 2 * components : 12 + 3 * components].astype(np.float64)
+    totals = weights.sum(axis=1, keepdims=True)
+    weights = np.divide(
+        weights, totals, out=np.full_like(weights, 1.0 / components), where=totals > 0
+    )
+    generator = np.random.default_rng(seed)
+    cumulative = np.cumsum(weights, axis=1)
+    picks = generator.random((len(weights), 1))
+    chosen = (picks > cumulative).sum(axis=1).clip(0, components - 1)
+    rows = np.arange(len(weights))
+    sampled = generator.normal(means[rows, chosen], np.maximum(scales[rows, chosen], 1e-3))
+    return np.clip(sampled, 0.0, 1.0)
+
+
 def _reconstruct_v2(
     timestamps: list[float],
     predicted: np.ndarray[Any, Any],
@@ -1301,6 +1477,8 @@ def _reconstruct_v2(
     flow_scale: float,
     seed: int,
     anchor_weight: float = _ABSOLUTE_ANCHOR_WEIGHT,
+    mixture_components: int = 0,
+    overlap_beat_limit: float | None = None,
 ) -> list[dict[str, Any]]:
     """Turn Placement-v2 predictions into legal, spacing-accurate osu! objects.
 
@@ -1310,6 +1488,11 @@ def _reconstruct_v2(
     """
 
     scale = min(3.75, max(0.45, float(flow_scale)))
+    distances = (
+        _sample_mixture_distances(predicted, mixture_components, seed)
+        if mixture_components and predicted.shape[-1] >= 12 + 3 * mixture_components
+        else predicted[:, 0].astype(np.float64)
+    )
     left, right = margin, PLAYFIELD_WIDTH - margin
     top, bottom = margin, PLAYFIELD_HEIGHT - margin
     x = min(right, max(left, float(predicted[0][8]) * PLAYFIELD_WIDTH))
@@ -1330,8 +1513,18 @@ def _reconstruct_v2(
             # rhythm model chose, so the time-derived ceiling always wins.
             ceiling = min(_MAXIMUM_JUMP_PX, max(48.0, 1.9 * delta_ms))
             distance = min(
-                ceiling, max(_MINIMUM_JUMP_PX, float(values[0]) * 640.0 * scale)
+                ceiling, max(_MINIMUM_JUMP_PX, float(distances[index]) * 640.0 * scale)
             )
+            # Easy through Hard treat two consecutive objects on identical
+            # coordinates within the tier's beat limit as a ranking error, so
+            # those tiers get a readable near-stack instead of an exact one.
+            # Insane and above may stack exactly, as human maps do.
+            if (
+                overlap_beat_limit is not None
+                and distance < _NEAR_STACK_PX
+                and delta_ms <= overlap_beat_limit * beat_ms + 1e-9
+            ):
+                distance = _NEAR_STACK_PX
             step_x = math.cos(phase) * distance
             step_y = math.sin(phase) * distance
             anchor_x = min(right, max(left, float(values[8]) * PLAYFIELD_WIDTH))
@@ -1360,8 +1553,15 @@ def _reconstruct_v2(
             "type": 1 | combo,
             "hitsounds": 0,
         }
+        available_ms = next_gap - _MINIMUM_OBJECT_GAP_MS
         if kind == 2 and index + 1 < len(timestamps) and next_gap >= max(1_000.0, beat_ms * 2.0):
-            end = timestamp + min(max(500.0, hold_ms), next_gap - 20.0)
+            beats = _snapped_hold_beats(
+                hold_ms / beat_ms,
+                available_ms / beat_ms,
+                _SPINNER_BEAT_DIVISIONS,
+                minimum_beats=1.0,
+            )
+            end = timestamp + (beats * beat_ms if beats else max(500.0, available_ms))
             obj.update(
                 {
                     "x": 256.0,
@@ -1372,15 +1572,25 @@ def _reconstruct_v2(
             )
         elif kind == 1 and index + 1 < len(timestamps):
             velocity = slider_lengths[index]
-            available_ms = next_gap - 20.0
-            length = min(240.0, max(40.0, float(values[6]) * 512.0))
+            desired_length = min(240.0, max(40.0, float(values[6]) * 512.0))
             repeats = max(1, min(4, 1 + int(round(float(values[10]) * 4.0))))
-            duration_ms = length / velocity * beat_ms
-            while repeats > 1 and duration_ms * repeats > available_ms:
+            # A slider ends where its duration says, so an arbitrary predicted
+            # pixel length lands the tail off the beat grid. Snap the duration to
+            # an editor division first, then derive the length from it: the tail
+            # is then exactly as snapped as the head the rhythm model chose.
+            beats = 0.0
+            while repeats >= 1:
+                beats = _snapped_hold_beats(
+                    desired_length / velocity,
+                    available_ms / beat_ms / repeats,
+                    _SLIDER_BEAT_DIVISIONS,
+                    minimum_beats=35.0 / velocity,
+                )
+                if beats:
+                    break
                 repeats -= 1
-            if duration_ms > available_ms:
-                length = max(0.0, available_ms / beat_ms * velocity)
-            if length >= 35.0:
+            length = beats * velocity
+            if beats and length >= 35.0:
                 end_x, end_y = _place_at_distance(x, y, phase, length, margin)
                 obj.update(
                     {
@@ -1389,7 +1599,7 @@ def _reconstruct_v2(
                             "type": 0,
                             "endpoint": [end_x, end_y],
                             "len": length,
-                            "repeats": repeats,
+                            "repeats": max(1, repeats),
                         },
                     }
                 )
@@ -1428,11 +1638,13 @@ def predict_placement(
     if not times:
         raise InputError("Placement received no rhythm events.")
     model = _cached_placement_model(str(model_path))
+    density = realized_density(times, target_density)
+    profile_key = _resolved_profile(difficulty_tier, target_stars).key
     if architecture in _V2_FAMILY:
         features, beat_lengths, slider_lengths = _v2_inference_features(
             document,
             times,
-            target_density,
+            density,
             difficulty_tier=difficulty_tier,
             target_stars=target_stars,
         )
@@ -1453,8 +1665,12 @@ def predict_placement(
             flow_scale=flow_scale,
             seed=seed,
             anchor_weight=_ANCHOR_WEIGHTS.get(architecture, _ABSOLUTE_ANCHOR_WEIGHT),
+            mixture_components=(
+                PLACEMENT_MIXTURE_COMPONENTS if architecture == "placement-v4" else 0
+            ),
+            overlap_beat_limit=_OVERLAP_BEAT_LIMITS.get(profile_key or ""),
         )
-    features = _inference_features(document, timestamps, target_density)
+    features = _inference_features(document, timestamps, density)
     predicted = _cached_predictions(
         model,
         str(model_path),

@@ -108,7 +108,26 @@ def _select_events(
     target_density: float,
     duration_seconds: float,
     min_spacing_ms: float = 45.0,
+    stream_window_ms: float | None = None,
+    stream_threshold_ratio: float = 0.97,
+    stream_passes: int = 3,
 ) -> np.ndarray[Any, Any]:
+    """Select hit timestamps, then grow the runs a flat threshold cuts short.
+
+    Measured on the held-out split, notes inside a human stream carry a lower
+    predicted probability than isolated notes (mean 0.800 against 0.832), so one
+    per-tier cutoff removes them preferentially: stream recall trailed non-stream
+    recall by 0.25 on Insane and 0.17 on Hard. This applies hysteresis, the same
+    idea edge detectors use. A high cutoff still decides where a run may start,
+    and only a candidate continuing an already-selected run is judged against the
+    lower one, so isolated weak candidates are never admitted.
+
+    The default continuation ratio was selected on the held-out split as the
+    strongest setting that costs no F1: stream recall rises from 0.7670 to 0.7905
+    with F1 unchanged at 0.761. Lowering it keeps buying stream recall but starts
+    trading precision away (0.88 reaches 0.8345 stream recall at 0.7566 F1).
+    """
+
     eligible = np.flatnonzero(probabilities >= threshold)
     ranked = sorted(eligible.tolist(), key=lambda index: (-probabilities[index], index))
     selected: list[int] = []
@@ -116,9 +135,39 @@ def _select_events(
         timestamp = candidate_times[index]
         if all(abs(timestamp - candidate_times[other]) >= min_spacing_ms for other in selected):
             selected.append(index)
+
+    if stream_window_ms and stream_window_ms > 0.0 and selected:
+        continuation = threshold * stream_threshold_ratio
+        chosen = set(selected)
+        for _pass in range(max(0, stream_passes)):
+            anchors = np.sort(candidate_times[np.asarray(sorted(chosen), dtype=int)])
+            candidates = [
+                index
+                for index in np.flatnonzero(probabilities >= continuation).tolist()
+                if index not in chosen
+            ]
+            added = 0
+            for index in sorted(candidates, key=lambda item: -probabilities[item]):
+                timestamp = candidate_times[index]
+                position = int(np.searchsorted(anchors, timestamp))
+                neighbours = anchors[max(0, position - 1) : position + 1]
+                if neighbours.size == 0:
+                    continue
+                nearest = float(np.min(np.abs(neighbours - timestamp)))
+                # Only continue an existing run, and never violate the spacing
+                # floor that keeps the map playable.
+                if nearest > stream_window_ms or nearest < min_spacing_ms:
+                    continue
+                chosen.add(index)
+                added += 1
+            if not added:
+                break
+            selected = sorted(chosen)
+        selected = sorted(chosen)
+
     maximum = max(1, math.ceil(target_density * duration_seconds * 1.5))
     if len(selected) > maximum:
-        selected = selected[:maximum]
+        selected = sorted(selected, key=lambda index: -probabilities[index])[:maximum]
     return np.asarray(sorted(selected, key=lambda index: candidate_times[index]), dtype=int)
 
 
@@ -232,12 +281,17 @@ def predict_modern_rhythm(
     candidate_times = np.asarray(
         [candidate.timestamp_ms for candidate in grid.candidates], dtype=np.float64
     )
+    # A stream is consecutive quarter-beat notes, so the continuation window is
+    # one quarter beat with a small tolerance for timing drift.
+    uninherited = document.timing_points()["uts"]
+    beat_ms = float(uninherited[0]["tickLength"]) if uninherited else 0.0
     selected = _select_events(
         candidate_times,
         probabilities,
         threshold=selected_threshold,
         target_density=density,
         duration_seconds=feature_result.duration_seconds,
+        stream_window_ms=(beat_ms / 4.0 * 1.15 if beat_ms > 0 else None),
     )
     if selected.size == 0:
         raise InputError(

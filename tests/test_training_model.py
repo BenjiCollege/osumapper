@@ -26,6 +26,7 @@ from osumapper.training.loader import iter_windows, summarize_loader
 from osumapper.training.model import build_rhythm_model, load_rhythm_model
 from osumapper.training.placement import analyze_placement
 from osumapper.training.placement_learning import (
+    _MINIMUM_OBJECT_GAP_MS,
     PLACEMENT_V2_FEATURE_DIMENSION,
     PLACEMENT_V2_TARGET_DIMENSION,
     _reconstruct_v2,
@@ -329,12 +330,13 @@ class TrainingModelTests(unittest.TestCase):
             self.assertTrue(all(0 <= obj["x"] <= 512 and 0 <= obj["y"] <= 384 for obj in placed))
             np.testing.assert_allclose(prediction, reloaded, rtol=1e-6, atol=1e-6)
 
-    def test_placement_v2_is_the_default_and_reconstructs_legal_objects(self) -> None:
+    def test_placement_v2_reconstructs_legal_objects(self) -> None:
         with tempfile.TemporaryDirectory() as name:
             model = build_placement_model(
                 sequence_length=16,
                 learning_rate=1e-3,
                 jit_compile=False,
+                architecture="placement-v2",
                 model_dimension=24,
                 blocks=1,
                 attention_heads=4,
@@ -417,12 +419,123 @@ class TrainingModelTests(unittest.TestCase):
                     document, timestamps, target_density=2.0, flow_scale=2.0, **common
                 )
                 after_spacing_change = spy.call_count
-                # Density does reach the model input, so it must miss the cache.
+                # Density is now derived from the timestamps, so the caller's
+                # target no longer varies the model input either.
                 predict_placement(document, timestamps, target_density=4.0, **common)
-                after_density_change = spy.call_count
+                after_target_change = spy.call_count
+                # Different timestamps are a different map: that must re-run.
+                predict_placement(
+                    document,
+                    np.asarray([500, 900, 1_300, 1_700]),
+                    target_density=2.0,
+                    **common,
+                )
+                after_rhythm_change = spy.call_count
 
             self.assertEqual(after_spacing_change, 1)
-            self.assertEqual(after_density_change, 2)
+            self.assertEqual(after_target_change, 1)
+            self.assertEqual(after_rhythm_change, 2)
+
+    def test_placement_v4_mixture_produces_stacks_a_point_estimate_cannot(self) -> None:
+        # A point estimate lands on the conditional mean, so a bimodal
+        # stack/jump distribution decodes to a medium spacing that never occurs
+        # in the data. Sampling the mixture must recover both modes.
+        from osumapper.training.placement_learning import (
+            PLACEMENT_MIXTURE_COMPONENTS as K,
+        )
+
+        count = 400
+        width = 12 + 3 * K
+        predicted = np.zeros((count, width), dtype=np.float32)
+        predicted[:, 2] = 1.0
+        predicted[:, 3] = 1.0
+        predicted[:, 8] = 0.5
+        predicted[:, 9] = 0.5
+        # Half the mass on a stack (~3px), half on a jump (~192px).
+        predicted[:, 12] = 0.5
+        predicted[:, 13] = 0.5
+        predicted[:, 12 + K] = 3.0 / 640.0
+        predicted[:, 13 + K] = 192.0 / 640.0
+        predicted[:, 12 + 2 * K] = 0.002
+        predicted[:, 13 + 2 * K] = 0.002
+        predicted[:, 0] = 0.5 * (3.0 / 640.0) + 0.5 * (192.0 / 640.0)  # the mean
+        timestamps = [1_000.0 + index * 300.0 for index in range(count)]
+
+        def stack_ratio(components: int) -> float:
+            objects = _reconstruct_v2(
+                timestamps,
+                predicted,
+                beat_lengths=[600.0] * count,
+                slider_lengths=[100.0] * count,
+                margin=36.0,
+                flow_scale=1.0,
+                seed=2026,
+                mixture_components=components,
+            )
+            steps = [
+                math.hypot(
+                    float(objects[i]["x"]) - float(objects[i - 1]["x"]),
+                    float(objects[i]["y"]) - float(objects[i - 1]["y"]),
+                )
+                for i in range(1, count)
+            ]
+            return sum(step < 8.0 for step in steps) / len(steps)
+
+        self.assertEqual(stack_ratio(0), 0.0)
+        self.assertGreater(stack_ratio(K), 0.3)
+
+    def test_placement_is_conditioned_on_the_density_it_actually_places(self) -> None:
+        # Training conditions each window on its map's real objects_per_second.
+        # Passing a tier's nominal target instead understated density by ~40%.
+        from osumapper.training.placement_learning import realized_density
+
+        # 100 objects spanning 50s is 2.0 objects/sec regardless of the target.
+        timestamps = [1_000.0 + index * 505.05 for index in range(100)]
+
+        self.assertAlmostEqual(realized_density(timestamps, 0.7), 2.0, places=2)
+        # Degenerate input keeps the caller's value rather than dividing by zero.
+        self.assertEqual(realized_density([1_000.0], 0.7), 0.7)
+        self.assertEqual(realized_density([500.0, 500.0], 1.3), 1.3)
+
+    def test_learned_slider_and_spinner_ends_land_on_editor_snaps(self) -> None:
+        # Object starts come from the rhythm grid and are always snapped, but a
+        # slider's tail is set by its duration. Deriving that duration from a
+        # continuous predicted pixel length put 40-70% of holds off the grid.
+        count = 12
+        beat_ms = 500.0
+        predicted = np.zeros((count, PLACEMENT_V2_TARGET_DIMENSION), dtype=np.float32)
+        predicted[:, 0] = 0.15
+        predicted[:, 2] = 1.0
+        predicted[:, 4] = 1.0  # every object is a slider
+        predicted[:, 6] = 0.37  # a length that does not divide the beat evenly
+        predicted[:, 8] = 0.5
+        predicted[:, 9] = 0.5
+        predicted[:, 10] = 0.3
+        predicted[:, 11] = 0.4
+        timestamps = [1_000.0 + index * beat_ms for index in range(count)]
+
+        objects = _reconstruct_v2(
+            timestamps,
+            predicted,
+            beat_lengths=[beat_ms] * count,
+            slider_lengths=[100.0] * count,
+            margin=36.0,
+            flow_scale=1.0,
+            seed=2026,
+        )
+
+        sliders = [obj for obj in objects if int(obj["type"]) & 2]
+        self.assertTrue(sliders, "expected the slider branch to be exercised")
+        for obj in sliders:
+            generator = obj["sliderGenerator"]
+            duration_ms = generator["len"] / 100.0 * beat_ms * generator["repeats"]
+            end_ms = float(obj["time"]) + duration_ms
+            # Distance from the nearest 1/8 beat tick, in milliseconds.
+            position = (end_ms - 1_000.0) / beat_ms
+            error = abs(position * 8 - round(position * 8)) * beat_ms / 8
+            self.assertLess(error, 2.0, f"slider end off-grid by {error:.2f}ms")
+            self.assertGreaterEqual(duration_ms, 0.0)
+            self.assertLessEqual(duration_ms, beat_ms - _MINIMUM_OBJECT_GAP_MS + 1e-6)
 
     def test_placement_v2_spacing_follows_the_calibrated_flow_scale(self) -> None:
         # Full-set star calibration tunes spacing while the rhythm is locked, so a

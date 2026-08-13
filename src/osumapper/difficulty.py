@@ -39,13 +39,17 @@ class StandardDifficulty:
         return value
 
 
+# Target densities are the measured median objects/second of 2,536 human
+# osu!standard maps in the local dataset, per tier. The previous values were
+# uniformly about 0.6x these medians, which starved the higher tiers of objects
+# and pushed star calibration into buying difficulty with spacing instead.
 STANDARD_DIFFICULTIES: tuple[StandardDifficulty, ...] = (
-    StandardDifficulty("easy", "Easy", 0.0, 2.0, 1.50, 0.70, 3.0, 3.5, 3.0, 4.0),
-    StandardDifficulty("normal", "Normal", 2.0, 2.7, 2.35, 1.10, 4.0, 3.8, 5.0, 6.0),
-    StandardDifficulty("hard", "Hard", 2.7, 4.0, 3.35, 1.60, 5.0, 4.0, 7.0, 8.0),
-    StandardDifficulty("insane", "Insane", 4.0, 5.3, 4.65, 2.20, 6.0, 4.0, 8.0, 9.0),
-    StandardDifficulty("expert", "Expert", 5.3, 6.5, 5.90, 2.80, 6.5, 4.0, 9.0, 9.5),
-    StandardDifficulty("expert-plus", "Expert+", 6.5, None, 7.00, 3.50, 7.0, 4.0, 9.5, 10.0),
+    StandardDifficulty("easy", "Easy", 0.0, 2.0, 1.50, 1.10, 3.0, 3.5, 3.0, 4.0),
+    StandardDifficulty("normal", "Normal", 2.0, 2.7, 2.35, 1.80, 4.0, 3.8, 5.0, 6.0),
+    StandardDifficulty("hard", "Hard", 2.7, 4.0, 3.35, 2.70, 5.0, 4.0, 7.0, 8.0),
+    StandardDifficulty("insane", "Insane", 4.0, 5.3, 4.65, 3.60, 6.0, 4.0, 8.0, 9.0),
+    StandardDifficulty("expert", "Expert", 5.3, 6.5, 5.90, 4.35, 6.5, 4.0, 9.0, 9.5),
+    StandardDifficulty("expert-plus", "Expert+", 6.5, None, 7.00, 5.85, 7.0, 4.0, 9.5, 10.0),
 )
 
 STANDARD_DIFFICULTY_KEYS = tuple(profile.key for profile in STANDARD_DIFFICULTIES)
