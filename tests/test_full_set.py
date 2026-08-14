@@ -334,7 +334,10 @@ class FullSetTests(unittest.TestCase):
             self.assertTrue(set_report["all_precision_targets_met"])
             self.assertEqual(set_report["requested_star_precision"], 0.03)
             self.assertEqual(set_report["placement_engine"], "pattern-planner-v1")
-            self.assertFalse(set_report["difficulty_nesting_enforced"])
+            # difficulty_nesting_enforced follows whichever rhythm model is
+            # installed, so it is asserted in
+            # test_report_describes_the_models_that_actually_produced_the_package
+            # where the model is written explicitly.
             for profile in FULL_SET_DIFFICULTIES:
                 self.assertTrue((root / f"full-set.{profile.key}.criteria.json").is_file())
 

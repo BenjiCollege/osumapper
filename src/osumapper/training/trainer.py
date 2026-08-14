@@ -21,6 +21,7 @@ from osumapper.training.config import (
     DatasetPaths,
     GridConfig,
     RhythmTrainingConfig,
+    discover_trained_models,
 )
 from osumapper.training.features import extract_dataset_features
 from osumapper.training.loader import LoaderSummary, make_tf_dataset
@@ -49,6 +50,11 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
 
 
 def default_model_root(architecture: str = "conformer-v6") -> Path:
+    # Prefer whatever is actually trained: folders are named after the dataset and
+    # seed, so the conventional name below usually does not exist on disk.
+    discovered = discover_trained_models(project_root(), "rhythm")
+    if discovered:
+        return discovered[0]
     name = {
         "conformer-v7": "rhythm-conformer-v7-full-set",
         "conformer-v6": "rhythm-conformer-v6-full-set",

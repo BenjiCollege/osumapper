@@ -301,7 +301,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-v6",
             "conformer-v7",
         ),
-        default="conformer-v7",
+        default="conformer-v6",
     )
     dataset_windows.add_argument("--rebuild", action="store_true")
 
@@ -359,7 +359,7 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-v6",
             "conformer-v7",
         ),
-        default="conformer-v7",
+        default="conformer-v6",
     )
     train_rhythm_parser.add_argument(
         "--stream-weight",

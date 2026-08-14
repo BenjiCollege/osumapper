@@ -7,13 +7,13 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from osumapper.training.config import discover_trained_models
 from osumapper.ui import (
     GenerationOptions,
     build_generate_command,
     default_generation_models,
     default_training_model,
     discover_inputs,
-    discover_models,
     model_bundle_paths,
     normalize_input_path,
     summarize_process_error,
@@ -67,7 +67,7 @@ class UiHelperTests(unittest.TestCase):
             top = self._write_model(root, "placement-v4-657-seed-2026", "placement-v4")
             with patch.dict(os.environ, {}, clear=True):
                 rhythm, placement = default_generation_models(root)
-                ordered = discover_models(root, "rhythm")
+                ordered = discover_trained_models(root, "rhythm")
 
         self.assertEqual(rhythm, best)
         self.assertEqual(placement, top)
@@ -80,7 +80,7 @@ class UiHelperTests(unittest.TestCase):
             partial.mkdir(parents=True)
             (partial / "model.keras").touch()  # no config.json: training died early
             with patch.dict(os.environ, {}, clear=True):
-                found = discover_models(root, "rhythm")
+                found = discover_trained_models(root, "rhythm")
 
         self.assertEqual(found, [])
 

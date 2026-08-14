@@ -22,7 +22,11 @@ from osumapper.difficulty import (
 from osumapper.errors import InputError
 from osumapper.paths import project_root
 from osumapper.presets import preset_names
-from osumapper.training.config import DatasetPaths
+from osumapper.training.config import (
+    DatasetPaths,
+    discover_trained_models,
+    recorded_architecture,
+)
 from osumapper.training.storage import read_json
 
 SUPPORTED_INPUTS = {
@@ -51,28 +55,6 @@ DEFAULT_RHYTHM_MODEL = "rhythm-conformer-v5-curated-run1-seed-2026"
 DEFAULT_V6_TRAINING_MODEL = "rhythm-conformer-v6-curated-657-songs-seed-2026"
 DEFAULT_PLACEMENT_MODEL = "placement-v4"
 LEGACY_PLACEMENT_MODEL = "placement-v3"
-# Ranked by measured held-out quality, best first, so the interface can default
-# to the strongest trained model rather than the newest one. Conformer-v6 leads
-# v7 deliberately: v7's stream-aware training scored 0.7542 F1 against v6's
-# 0.7607, and the stream recall it bought is already available at no accuracy
-# cost from stream-preserving selection.
-RHYTHM_PREFERENCE = (
-    "conformer-v6",
-    "conformer-v7",
-    "conformer-v5",
-    "conformer-v4",
-    "conformer-v3",
-    "conformer-v2",
-    "transformer-v1",
-)
-# Placement-v4 reproduces human stacking and spacing spread; v3 leads v2 on jump
-# distance; v1 could not place spinners.
-PLACEMENT_PREFERENCE = (
-    "placement-v4",
-    "placement-v3",
-    "placement-v2",
-    "placement-v1",
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,61 +118,19 @@ def summarize_process_error(message: str | None) -> str:
     return normalized if len(normalized) <= 110 else f"{normalized[:107]}…"
 
 
-def _model_architecture(model: Path) -> str:
-    """Read the architecture a trained model recorded for itself."""
-
-    _, config_path = model_bundle_paths(model)
-    config = read_json(config_path, default=None)
-    if not isinstance(config, dict):
-        return ""
-    recorded = (
-        config.get("architecture")
-        or config.get("model_kind")
-        or config.get("training", {}).get("architecture")
-    )
-    return str(recorded) if recorded else ""
-
-
-def discover_models(root: Path, kind: str) -> list[Path]:
-    """List trained models of one kind, best first.
-
-    Folder names are chosen by whoever ran the training, so matching on a fixed
-    name found nothing once a run was named after its dataset. This reads the
-    architecture each model recorded and ranks by measured quality, which also
-    lets the interface offer real choices instead of a path to type.
-    """
-
-    preference = RHYTHM_PREFERENCE if kind == "rhythm" else PLACEMENT_PREFERENCE
-    modern_root = root / "models" / "modern"
-    if not modern_root.is_dir():
-        return []
-    found: list[tuple[int, str, Path]] = []
-    for candidate in sorted(modern_root.iterdir(), key=lambda item: item.name.casefold()):
-        if not candidate.is_dir():
-            continue
-        model_file, config_file = model_bundle_paths(candidate)
-        if not (model_file.is_file() and config_file.is_file()):
-            continue
-        architecture = _model_architecture(candidate)
-        if architecture not in preference:
-            continue
-        found.append((preference.index(architecture), candidate.name.casefold(), candidate))
-    return [item[2] for item in sorted(found, key=lambda item: (item[0], item[1]))]
-
-
 def default_generation_models(root: Path) -> tuple[Path, Path]:
     modern_root = root / "models" / "modern"
     configured_rhythm = os.environ.get("OSUMAPPER_RHYTHM_MODEL")
     if configured_rhythm:
         rhythm = Path(configured_rhythm).expanduser()
     else:
-        discovered = discover_models(root, "rhythm")
+        discovered = discover_trained_models(root, "rhythm")
         rhythm = discovered[0] if discovered else modern_root / DEFAULT_RHYTHM_MODEL
     configured_placement = os.environ.get("OSUMAPPER_PLACEMENT_MODEL")
     if configured_placement:
         placement = Path(configured_placement).expanduser()
     else:
-        discovered = discover_models(root, "placement")
+        discovered = discover_trained_models(root, "placement")
         placement = discovered[0] if discovered else modern_root / DEFAULT_PLACEMENT_MODEL
     return rhythm, placement
 
@@ -448,8 +388,8 @@ class OsumapperStudio:
         paths = DatasetPaths.at()
         dataset_config = read_json(paths.config, default={})
         default_rhythm_model, default_placement_model = default_generation_models(root)
-        self.rhythm_choices = discover_models(root, "rhythm")
-        self.placement_choices = discover_models(root, "placement")
+        self.rhythm_choices = discover_trained_models(root, "rhythm")
+        self.placement_choices = discover_trained_models(root, "placement")
         self.output_dir = tk.StringVar(value=str(root / "output"))
         self.preset = tk.StringVar(value="default")
         self.mode = tk.StringVar(value="standard")
@@ -997,7 +937,7 @@ class OsumapperStudio:
         for name, path in (("Rhythm", rhythm), ("Placement", placement)):
             model_file, config_file = model_bundle_paths(path)
             if model_file.is_file() and config_file.is_file():
-                architecture = _model_architecture(path) or "unknown architecture"
+                architecture = recorded_architecture(path) or "unknown architecture"
                 calibrated = ""
                 if name == "Rhythm":
                     config = read_json(config_file, default={})

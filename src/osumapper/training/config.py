@@ -149,3 +149,68 @@ def prediction_threshold(
     if not 0 < threshold < 1:
         raise ValueError("Prediction threshold must be between 0 and 1.")
     return threshold
+
+
+# Ranked by measured held-out quality, best first. Conformer-v6 leads v7
+# deliberately: v7 scored 0.7542 F1 against v6's 0.7607, and the stream recall it
+# bought is available at no accuracy cost from stream-preserving selection.
+RHYTHM_PREFERENCE = (
+    "conformer-v6",
+    "conformer-v7",
+    "conformer-v5",
+    "conformer-v4",
+    "conformer-v3",
+    "conformer-v2",
+    "transformer-v1",
+)
+# Placement-v4 reproduces human stacking and spacing spread; v3 leads v2 on jump
+# distance; v1 could not place spinners.
+PLACEMENT_PREFERENCE = ("placement-v4", "placement-v3", "placement-v2", "placement-v1")
+
+
+def model_bundle_paths(model: Path) -> tuple[Path, Path]:
+    if model.suffix.casefold() == ".keras":
+        return model, model.parent / "config.json"
+    return model / "model.keras", model / "config.json"
+
+
+def recorded_architecture(model: Path) -> str:
+    """Read the architecture a trained model recorded for itself."""
+
+    from osumapper.training.storage import read_json
+
+    _, config_path = model_bundle_paths(model)
+    config = read_json(config_path, default=None)
+    if not isinstance(config, dict):
+        return ""
+    recorded = (
+        config.get("architecture")
+        or config.get("model_kind")
+        or config.get("training", {}).get("architecture")
+    )
+    return str(recorded) if recorded else ""
+
+
+def discover_trained_models(root: Path, kind: str) -> list[Path]:
+    """List complete trained models of one kind, best measured first.
+
+    Training names folders after the dataset and seed, so matching a fixed folder
+    name finds nothing. Reading the recorded architecture makes both the CLI and
+    the interface pick the strongest model actually present.
+    """
+
+    preference = RHYTHM_PREFERENCE if kind == "rhythm" else PLACEMENT_PREFERENCE
+    modern_root = root / "models" / "modern"
+    if not modern_root.is_dir():
+        return []
+    found: list[tuple[int, str, Path]] = []
+    for candidate in sorted(modern_root.iterdir(), key=lambda item: item.name.casefold()):
+        if not candidate.is_dir():
+            continue
+        model_file, config_file = model_bundle_paths(candidate)
+        if not (model_file.is_file() and config_file.is_file()):
+            continue
+        architecture = recorded_architecture(candidate)
+        if architecture in preference:
+            found.append((preference.index(architecture), candidate.name.casefold(), candidate))
+    return [item[2] for item in sorted(found, key=lambda item: (item[0], item[1]))]

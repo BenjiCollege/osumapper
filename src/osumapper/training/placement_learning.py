@@ -20,7 +20,7 @@ from osumapper.difficulty import (
 from osumapper.errors import InputError
 from osumapper.paths import project_root
 from osumapper.training.beatmaps import parse_timing_points
-from osumapper.training.config import DatasetPaths
+from osumapper.training.config import DatasetPaths, discover_trained_models
 from osumapper.training.model import _require_keras
 from osumapper.training.splits import load_split
 from osumapper.training.storage import read_json, write_json
@@ -159,11 +159,18 @@ def placement_architecture(model_root: Path | None) -> str:
     return str(recorded) if recorded else "placement-v1"
 
 
+def _default_placement_root() -> Path:
+    """Prefer a trained placement model over the conventional folder name."""
+
+    discovered = discover_trained_models(project_root(), "placement")
+    if discovered:
+        return discovered[0]
+    return project_root() / "models" / "modern" / DEFAULT_PLACEMENT_ARCHITECTURE
+
+
 def _placement_root(model_root: Path | None) -> Path:
     root = (
-        (model_root or project_root() / "models" / "modern" / DEFAULT_PLACEMENT_ARCHITECTURE)
-        .expanduser()
-        .resolve()
+        (model_root or _default_placement_root()).expanduser().resolve()
     )
     return root.parent if root.suffix.casefold() == ".keras" else root
 
@@ -1633,9 +1640,7 @@ def predict_placement(
     flow_scale: float = 1.0,
 ) -> list[dict[str, Any]]:
     root = (
-        (model_root or project_root() / "models" / "modern" / DEFAULT_PLACEMENT_ARCHITECTURE)
-        .expanduser()
-        .resolve()
+        (model_root or _default_placement_root()).expanduser().resolve()
     )
     model_path = root if root.suffix.casefold() == ".keras" else root / "model.keras"
     config_root = root.parent if root.suffix.casefold() == ".keras" else root
@@ -1739,9 +1744,7 @@ def evaluate_placement(
     """Evaluate a trained placement model once on the held-out test split."""
     paths = DatasetPaths.at(dataset_root)
     root = (
-        (model_root or project_root() / "models" / "modern" / DEFAULT_PLACEMENT_ARCHITECTURE)
-        .expanduser()
-        .resolve()
+        (model_root or _default_placement_root()).expanduser().resolve()
     )
     model_path = root if root.suffix.casefold() == ".keras" else root / "model.keras"
     config_root = root.parent if root.suffix.casefold() == ".keras" else root
