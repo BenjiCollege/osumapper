@@ -40,3 +40,48 @@ class AudioFeatureTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TimingRefinementTests(unittest.TestCase):
+    def test_refined_tempo_lands_on_the_beat_of_a_synthetic_click_track(self) -> None:
+        # Beat tracking returns tempo too coarsely for mapping: a 1.4 BPM error is
+        # about 3ms per beat, so a map drifts a whole beat off within minutes.
+        # A click track at a known tempo must come back at that tempo.
+        import math
+        import tempfile
+        import wave
+        from array import array
+
+        from osumapper.timing import estimate_timing
+
+        rate = 22_050
+        bpm = 150.0
+        beat_samples = int(rate * 60.0 / bpm)
+        total = beat_samples * 96
+        samples = array("h", bytes(total * 2))
+        for beat in range(96):
+            start = beat * beat_samples
+            for index in range(900):  # short percussive click
+                if start + index >= total:
+                    break
+                decay = math.exp(-index / 120.0)
+                samples[start + index] = int(
+                    12_000 * decay * math.sin(2 * math.pi * 1_800 * index / rate)
+                )
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "clicks.wav"
+            with wave.open(str(path), "wb") as stream:
+                stream.setnchannels(1)
+                stream.setsampwidth(2)
+                stream.setframerate(rate)
+                stream.writeframes(samples.tobytes())
+
+            estimate = estimate_timing(path)
+
+        multiples = (bpm / 2, bpm, bpm * 2)
+        self.assertTrue(
+            any(abs(estimate.bpm - value) < 1.0 for value in multiples),
+            f"expected a multiple of {bpm}, got {estimate.bpm}",
+        )
+        # Whole or half BPM: real music sits there, and so should the estimate.
+        self.assertAlmostEqual(estimate.bpm * 2, round(estimate.bpm * 2), places=3)

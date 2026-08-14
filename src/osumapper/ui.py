@@ -388,6 +388,7 @@ class OsumapperStudio:
         paths = DatasetPaths.at()
         dataset_config = read_json(paths.config, default={})
         default_rhythm_model, default_placement_model = default_generation_models(root)
+        self._model_displays: list[tuple[tk.StringVar, tk.StringVar, list[Path]]] = []
         self.rhythm_choices = discover_trained_models(root, "rhythm")
         self.placement_choices = discover_trained_models(root, "placement")
         self.output_dir = tk.StringVar(value=str(root / "output"))
@@ -614,13 +615,14 @@ class OsumapperStudio:
         ).pack(anchor="w", pady=(2, 7))
         self._model_row(settings, "Rhythm model", self.modern_model, self.rhythm_choices)
         self._model_row(settings, "Placement model", self.placement_model, self.placement_choices)
-        ttk.Label(
+        self.model_summary_label = ttk.Label(
             settings,
             text=self._model_summary(),
             style="Muted.TLabel",
             wraplength=390,
             justify="left",
-        ).pack(fill="x", pady=(0, 5))
+        )
+        self.model_summary_label.pack(fill="x", pady=(2, 6))
         ttk.Label(
             settings,
             text=(
@@ -924,32 +926,52 @@ class OsumapperStudio:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(fill="x", pady=3)
         ttk.Label(row, text=label, style="CardText.TLabel", width=15).pack(side="left")
-        values = [str(path) for path in choices]
-        combo = ttk.Combobox(row, textvariable=variable, values=values)
+        # Show folder names, never full paths. Every trained model lives under the
+        # same long directory, so a list of absolute paths rendered as several
+        # identical-looking rows and the selected one scrolled out of view.
+        display = tk.StringVar(value=Path(variable.get().strip() or ".").name)
+        combo = ttk.Combobox(row, textvariable=display, values=[p.name for p in choices])
         combo.pack(side="left", fill="x", expand=True)
-        if not values:
+        self._model_displays.append((display, variable, choices))
+
+        def apply_choice(_event: Any = None) -> None:
+            chosen = display.get().strip()
+            match = next((path for path in choices if path.name == chosen), None)
+            # A name picked from the list resolves to its folder; anything else is
+            # treated as a path the user typed for a model kept elsewhere.
+            variable.set(str(match) if match is not None else chosen)
+            self._refresh_model_summary()
+
+        combo.bind("<<ComboboxSelected>>", apply_choice)
+        combo.bind("<FocusOut>", apply_choice)
+        combo.bind("<Return>", apply_choice)
+        if not choices:
             ttk.Label(row, text="none trained", style="Muted.TLabel").pack(side="left", padx=(6, 0))
 
+    def _refresh_model_summary(self) -> None:
+        label = getattr(self, "model_summary_label", None)
+        if label is not None:
+            label.configure(text=self._model_summary())
+
+    def _describe_model(self, kind: str, path: Path) -> str:
+        model_file, config_file = model_bundle_paths(path)
+        if not (model_file.is_file() and config_file.is_file()):
+            return f"{kind}: not trained — nothing will generate"
+        architecture = recorded_architecture(path) or "unknown architecture"
+        detail = f"{kind}: {path.name}  ({architecture}"
+        if kind == "Rhythm":
+            config = read_json(config_file, default={})
+            calibrated = isinstance(config, dict) and "calibration" in config
+            detail += ", calibrated" if calibrated else ", NOT calibrated — using 0.5 threshold"
+        return detail + ")"
+
     def _model_summary(self) -> str:
-        rhythm = Path(self.modern_model.get().strip() or ".")
-        placement = Path(self.placement_model.get().strip() or ".")
-        parts = []
-        for name, path in (("Rhythm", rhythm), ("Placement", placement)):
-            model_file, config_file = model_bundle_paths(path)
-            if model_file.is_file() and config_file.is_file():
-                architecture = recorded_architecture(path) or "unknown architecture"
-                calibrated = ""
-                if name == "Rhythm":
-                    config = read_json(config_file, default={})
-                    calibrated = (
-                        ", calibrated"
-                        if isinstance(config, dict) and "calibration" in config
-                        else ", NOT calibrated"
-                    )
-                parts.append(f"{name}: {architecture}{calibrated}")
-            else:
-                parts.append(f"{name}: not trained yet")
-        return "  •  ".join(parts)
+        return "\n".join(
+            (
+                self._describe_model("Rhythm", Path(self.modern_model.get().strip() or ".")),
+                self._describe_model("Placement", Path(self.placement_model.get().strip() or ".")),
+            )
+        )
 
     @staticmethod
     def _path_row(parent: Any, label: str, variable: tk.StringVar, command: Any) -> None:
