@@ -12,6 +12,7 @@ from osumapper.difficulty import (
     LEGACY_DIFFICULTY_FEATURES,
     STAR_DIFFICULTY_FEATURES,
     V5_DIFFICULTY_FEATURES,
+    V7_DIFFICULTY_FEATURES,
 )
 from osumapper.errors import DependencyError, InputError
 from osumapper.paths import legacy_v7_root, project_root
@@ -24,6 +25,7 @@ from osumapper.training.config import (
 from osumapper.training.features import extract_dataset_features
 from osumapper.training.loader import LoaderSummary, make_tf_dataset
 from osumapper.training.model import (
+    _ADAMW_ARCHITECTURES,
     build_rhythm_model,
     compile_rhythm_model,
     load_rhythm_model,
@@ -48,6 +50,7 @@ def historical_empty_epochs(history: dict[str, Any]) -> list[int]:
 
 def default_model_root(architecture: str = "conformer-v6") -> Path:
     name = {
+        "conformer-v7": "rhythm-conformer-v7-full-set",
         "conformer-v6": "rhythm-conformer-v6-full-set",
         "conformer-v5": "rhythm-conformer-v5-full-set",
         "conformer-v4": "rhythm-conformer-v4-standard-stars",
@@ -225,6 +228,7 @@ def train_rhythm(
         "conformer-v4": STAR_DIFFICULTY_FEATURES,
         "conformer-v5": V5_DIFFICULTY_FEATURES,
         "conformer-v6": V5_DIFFICULTY_FEATURES,
+        "conformer-v7": V7_DIFFICULTY_FEATURES,
     }.get(training_config.architecture, LEGACY_DIFFICULTY_FEATURES)
     train_dataset, train_summary = make_tf_dataset(
         train_rows,
@@ -239,6 +243,7 @@ def train_rhythm(
         balance_songs=training_config.balance_songs,
         progress=lambda message: print(f"[windows] {message}"),
         difficulty_features=difficulty_features,
+        stream_weight=training_config.stream_weight,
     )
     validation_dataset, validation_summary = make_tf_dataset(
         validation_rows,
@@ -327,13 +332,13 @@ def train_rhythm(
                 optimizer_name=(
                     "adamw"
                     if training_config.architecture
-                    in {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6"}
+                    in _ADAMW_ARCHITECTURES
                     else "adam"
                 ),
                 weight_decay=training_config.weight_decay,
                 loss_name=(
                     "hard-negative-focal"
-                    if training_config.architecture == "conformer-v6"
+                    if training_config.architecture in {"conformer-v6", "conformer-v7"}
                     else "weighted-bce"
                 ),
             )
@@ -477,7 +482,7 @@ def train_rhythm(
             "difficulty_features": list(difficulty_features),
             "training_objective": (
                 "hard-negative-focal"
-                if training_config.architecture == "conformer-v6"
+                if training_config.architecture in {"conformer-v6", "conformer-v7"}
                 else "weighted-bce"
             ),
             "class_weight_positive": train_summary.positive_weight,

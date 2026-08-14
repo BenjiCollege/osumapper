@@ -102,6 +102,7 @@ class RhythmTrainingConfig:
     balance_songs: bool = True
     window_cache: str = "auto"
     weight_decay: float = 1e-4
+    stream_weight: float = 1.0
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)

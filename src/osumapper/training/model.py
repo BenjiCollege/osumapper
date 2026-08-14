@@ -4,6 +4,10 @@ from typing import Any
 
 from osumapper.errors import DependencyError, InputError
 
+_ADAMW_ARCHITECTURES = frozenset(
+    {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6", "conformer-v7"}
+)
+
 
 def _require_keras() -> Any:
     try:
@@ -47,17 +51,18 @@ def build_rhythm_model(
         "conformer-v4": "conformer-v4",
         "conformer-v5": "conformer-v5",
         "conformer-v6": "conformer-v6",
+        "conformer-v7": "conformer-v7",
     }
     try:
         selected_architecture = aliases[architecture.casefold()]
     except KeyError as exc:
         raise InputError(
-            "Architecture must be transformer-v1 or conformer-v2 through conformer-v6."
+            "Architecture must be transformer-v1 or conformer-v2 through conformer-v7."
         ) from exc
     conformer = selected_architecture.startswith("conformer-")
     dimension = model_dimension or (
         192
-        if selected_architecture in {"conformer-v5", "conformer-v6"}
+        if selected_architecture in {"conformer-v5", "conformer-v6", "conformer-v7"}
         else 160
         if selected_architecture in {"conformer-v3", "conformer-v4"}
         else 192
@@ -69,7 +74,7 @@ def build_rhythm_model(
     )
     heads = attention_heads or (
         6
-        if selected_architecture in {"conformer-v5", "conformer-v6"}
+        if selected_architecture in {"conformer-v5", "conformer-v6", "conformer-v7"}
         else 5
         if selected_architecture in {"conformer-v3", "conformer-v4"}
         else 6
@@ -85,12 +90,17 @@ def build_rhythm_model(
         (sequence_length, grid_dimension), name="grid_features", dtype="float32"
     )
     difficulty_input = keras.Input((difficulty_dimension,), name="difficulty", dtype="float32")
-    if selected_architecture in {"conformer-v5", "conformer-v6"} and difficulty_dimension != 7:
+    expected_difficulty = {"conformer-v5": 7, "conformer-v6": 7, "conformer-v7": 9}.get(
+        selected_architecture
+    )
+    if expected_difficulty is not None and difficulty_dimension != expected_difficulty:
+        tiers = expected_difficulty - 1
         raise InputError(
-            f"{selected_architecture.title()} requires target stars plus six one-hot tier features."
+            f"{selected_architecture} requires target stars plus {tiers} one-hot tier "
+            f"features ({expected_difficulty} difficulty inputs)."
         )
 
-    if selected_architecture == "conformer-v6":
+    if selected_architecture in {"conformer-v6", "conformer-v7"}:
         # A compact multi-scale stem captures short transients and longer
         # musical phrases before attention. V6 uses one fewer Conformer block
         # than V5, offsetting this small stem and reducing training latency.
@@ -119,7 +129,7 @@ def build_rhythm_model(
         )(audio_input)
     audio = keras.layers.LayerNormalization(name="audio_normalization")(audio)
     grid = keras.layers.Dense(dimension // 2, activation="gelu", name="grid_encoder")(grid_input)
-    if selected_architecture in {"conformer-v5", "conformer-v6"}:
+    if selected_architecture in {"conformer-v5", "conformer-v6", "conformer-v7"}:
         # Keep difficulty outside the shared song encoder. All six heads see
         # the same encoded music and grid; the one-hot tier input only selects
         # which head receives the loss for this curated human difficulty.
@@ -139,6 +149,7 @@ def build_rhythm_model(
         "conformer-v4",
         "conformer-v5",
         "conformer-v6",
+        "conformer-v7",
     }:
         # The musical grid is non-zero for every real candidate and zero for
         # padded positions, so this prevents padding from affecting attention.
@@ -212,6 +223,7 @@ def build_rhythm_model(
                 "conformer-v4",
                 "conformer-v5",
                 "conformer-v6",
+                "conformer-v7",
             }:
                 convolution_value = keras.layers.Dense(
                     dimension,
@@ -242,7 +254,7 @@ def build_rhythm_model(
             normalization = (
                 keras.layers.LayerNormalization
                 if selected_architecture
-                in {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6"}
+                in _ADAMW_ARCHITECTURES
                 else keras.layers.BatchNormalization
             )
             convolution = normalization(name=f"conformer_convolution_batch_norm_{block}")(
@@ -281,11 +293,15 @@ def build_rhythm_model(
     sequence = keras.layers.LayerNormalization(name="output_normalization")(sequence)
     # Mixed precision keeps the expensive encoder on Tensor Cores, while a
     # float32 probability head avoids underflow in calibration and weighted BCE.
-    if selected_architecture in {"conformer-v5", "conformer-v6"}:
+    if selected_architecture in {"conformer-v5", "conformer-v6", "conformer-v7"}:
         tier_names = ("easy", "normal", "hard", "insane", "expert", "expert_plus")
+        if selected_architecture == "conformer-v7":
+            # Master and Legendary extend the same nested chain, so a timestamp's
+            # probability still cannot fall as the requested tier rises.
+            tier_names = (*tier_names, "master", "legendary")
         tier_outputs = []
-        if selected_architecture == "conformer-v6":
-            # V6 predicts nested difficulty odds. Each harder tier adds a
+        if selected_architecture in {"conformer-v6", "conformer-v7"}:
+            # V6 and V7 predict nested difficulty odds. Each harder tier adds a
             # non-negative learned logit increment, so a musically important
             # Easy event cannot become less likely on Expert+. Target-star
             # conditioning also uses a non-negative coefficient, preserving
@@ -404,12 +420,14 @@ def build_rhythm_model(
         optimizer_name=(
             "adamw"
             if selected_architecture
-            in {"conformer-v3", "conformer-v4", "conformer-v5", "conformer-v6"}
+            in _ADAMW_ARCHITECTURES
             else "adam"
         ),
         weight_decay=weight_decay,
         loss_name=(
-            "hard-negative-focal" if selected_architecture == "conformer-v6" else "weighted-bce"
+            "hard-negative-focal"
+            if selected_architecture in {"conformer-v6", "conformer-v7"}
+            else "weighted-bce"
         ),
     )
     return model

@@ -16,6 +16,7 @@ from osumapper.difficulty import (
     STANDARD_DIFFICULTY_KEYS,
     STAR_DIFFICULTY_FEATURES,
     V5_DIFFICULTY_FEATURES,
+    V7_DIFFICULTY_FEATURES,
 )
 from osumapper.errors import DependencyError, InputError
 from osumapper.training.config import DatasetPaths, GridConfig
@@ -65,25 +66,38 @@ class LoaderSummary:
     song_balanced: bool = False
 
 
+_TIER_CONDITIONED_FEATURES = {
+    STAR_DIFFICULTY_FEATURES: STANDARD_DIFFICULTY_KEYS[:6],
+    V5_DIFFICULTY_FEATURES: STANDARD_DIFFICULTY_KEYS[:6],
+    V7_DIFFICULTY_FEATURES: STANDARD_DIFFICULTY_KEYS,
+}
+
+
 def difficulty_feature_array(
     row: dict[str, Any],
     feature_names: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
 ) -> np.ndarray[Any, Any]:
-    if feature_names in {STAR_DIFFICULTY_FEATURES, V5_DIFFICULTY_FEATURES}:
+    if feature_names in _TIER_CONDITIONED_FEATURES:
+        # Each feature set pins its own tier width. V4/V5/V6 were trained before
+        # Master and Legendary existed, so those tiers fold onto the closest tier
+        # they know; widening their input would break every model already saved.
+        tiers = _TIER_CONDITIONED_FEATURES[feature_names]
         tier = str(row["difficulty_tier"])
+        if tier not in tiers and tier in STANDARD_DIFFICULTY_KEYS:
+            tier = tiers[-1]
         try:
-            tier_index = STANDARD_DIFFICULTY_KEYS.index(tier)
+            tier_index = tiers.index(tier)
         except ValueError as exc:
             raise InputError(f"Unknown standard difficulty tier in dataset: {tier}") from exc
         if feature_names == STAR_DIFFICULTY_FEATURES:
             return np.asarray(
                 [
                     float(row["star_rating"]) / 10.0,
-                    tier_index / max(1, len(STANDARD_DIFFICULTY_KEYS) - 1),
+                    tier_index / max(1, len(tiers) - 1),
                 ],
                 dtype=np.float32,
             )
-        tier_one_hot = np.zeros(len(STANDARD_DIFFICULTY_KEYS), dtype=np.float32)
+        tier_one_hot = np.zeros(len(tiers), dtype=np.float32)
         tier_one_hot[tier_index] = 1.0
         return np.concatenate(
             (np.asarray([float(row["star_rating"]) / 10.0], dtype=np.float32), tier_one_hot)
@@ -125,6 +139,46 @@ def prepare_map(
     return PreparedMap(row, grid, audio, grid_features, difficulty, labels)
 
 
+STREAM_POSITIVE_WEIGHT = 2.0
+
+
+def stream_positive_weights(
+    prepared: PreparedMap,
+    *,
+    stream_weight: float = STREAM_POSITIVE_WEIGHT,
+) -> np.ndarray[Any, Any]:
+    """Weight stream notes above isolated notes when training the rhythm model.
+
+    Notes inside a human stream carry a lower predicted probability than isolated
+    notes (0.800 against 0.832 on the held-out split), so a single threshold
+    removes them first and generated high tiers lose the sustained runs that
+    define them. Up-weighting stream positives makes the model pay for missing
+    them during training, rather than leaving selection to patch it afterwards.
+    """
+
+    weights = np.ones(prepared.labels.shape[0], dtype=np.float32)
+    if stream_weight == 1.0:
+        return weights
+    labels = prepared.labels[:, 0] > 0.5
+    if labels.sum() < 3:
+        return weights
+    bpm = float(prepared.row.get("bpm_mean") or 0.0)
+    if bpm <= 0:
+        return weights
+    quarter_ms = 60_000.0 / bpm / 4.0 * 1.15
+    times = np.asarray(
+        [candidate.timestamp_ms for candidate in prepared.grid.candidates], dtype=np.float64
+    )
+    positive_indices = np.flatnonzero(labels)
+    positive_times = times[positive_indices]
+    fast = np.diff(positive_times) <= quarter_ms
+    in_stream = np.zeros(len(positive_times), dtype=bool)
+    in_stream[:-1] |= fast
+    in_stream[1:] |= fast
+    weights[positive_indices[in_stream]] = float(stream_weight)
+    return weights
+
+
 def iter_windows(
     rows: Iterable[dict[str, Any]],
     *,
@@ -132,6 +186,7 @@ def iter_windows(
     grid_config: GridConfig | None = None,
     audio_context_radius: int = 0,
     difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
+    stream_weight: float = 1.0,
 ) -> Iterator[WindowExample]:
     config = grid_config or GridConfig()
     length = config.sequence_length
@@ -147,6 +202,7 @@ def iter_windows(
         except InputError as exc:
             raise InputError(f"Could not prepare {row['map_path']}: {exc}") from exc
         count = prepared.labels.shape[0]
+        emphasis = stream_positive_weights(prepared, stream_weight=stream_weight)
         for start in range(0, count, length):
             stop = min(count, start + length)
             valid = stop - start
@@ -157,7 +213,7 @@ def iter_windows(
             audio[:valid] = prepared.audio[start:stop]
             grid[:valid] = prepared.grid_features[start:stop]
             labels[:valid] = prepared.labels[start:stop]
-            mask[:valid] = 1.0
+            mask[:valid] = emphasis[start:stop]
             yield WindowExample(
                 inputs={
                     "audio_features": audio,
@@ -177,6 +233,7 @@ def summarize_loader(
     grid_config: GridConfig | None = None,
     audio_context_radius: int = 0,
     difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
+    stream_weight: float = 1.0,
 ) -> LoaderSummary:
     windows = 0
     positives = 0
@@ -190,6 +247,7 @@ def summarize_loader(
         grid_config=grid_config,
         audio_context_radius=audio_context_radius,
         difficulty_features=difficulty_features,
+        stream_weight=stream_weight,
     ):
         windows += 1
         valid_positions += int(example.mask.sum())
@@ -223,6 +281,7 @@ def _window_cache_key(
     grid_config: GridConfig,
     audio_context_radius: int,
     difficulty_features: tuple[str, ...],
+    stream_weight: float = 1.0,
 ) -> str:
     feature_manifest = read_json(paths.features / "manifest.json", default={})
     identity = {
@@ -239,6 +298,7 @@ def _window_cache_key(
         "audio_context_radius": audio_context_radius,
         "difficulty_features": list(difficulty_features),
         "audio_features": feature_manifest.get("config", {}),
+        "stream_weight": stream_weight,
     }
     encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(encoded).hexdigest()[:20]
@@ -286,6 +346,7 @@ def _build_window_cache(
     grid_config: GridConfig,
     audio_context_radius: int,
     difficulty_features: tuple[str, ...],
+    stream_weight: float = 1.0,
     progress: Any | None = print,
 ) -> dict[str, Any]:
     song_ids = sorted({str(row["song_id"]) for row in rows})
@@ -317,6 +378,7 @@ def _build_window_cache(
             grid_config=grid_config,
             audio_context_radius=audio_context_radius,
             difficulty_features=difficulty_features,
+            stream_weight=stream_weight,
         ),
         start=1,
     ):
@@ -460,6 +522,7 @@ def make_tf_dataset(
     balance_songs: bool = False,
     progress: Any | None = print,
     difficulty_features: tuple[str, ...] = LEGACY_DIFFICULTY_FEATURES,
+    stream_weight: float = 1.0,
 ) -> tuple[Any, LoaderSummary]:
     try:
         import tensorflow as tf
@@ -480,6 +543,7 @@ def make_tf_dataset(
             grid_config=config,
             audio_context_radius=audio_context_radius,
             difficulty_features=difficulty_features,
+            stream_weight=stream_weight,
         )
         cache_root = paths.windows / str(cache_split) / cache_key
         manifest_path = cache_root / "manifest.json"
@@ -494,6 +558,7 @@ def make_tf_dataset(
                 grid_config=config,
                 audio_context_radius=audio_context_radius,
                 difficulty_features=difficulty_features,
+                stream_weight=stream_weight,
                 progress=progress,
             )
         summary = _summary_from_manifest(manifest, cache_root, song_balanced=balance_songs)
@@ -511,6 +576,7 @@ def make_tf_dataset(
             grid_config=config,
             audio_context_radius=audio_context_radius,
             difficulty_features=difficulty_features,
+            stream_weight=stream_weight,
         )
 
         def generator() -> Iterator[tuple[dict[str, Any], Any, Any]]:
@@ -520,6 +586,7 @@ def make_tf_dataset(
                 grid_config=config,
                 audio_context_radius=audio_context_radius,
                 difficulty_features=difficulty_features,
+                stream_weight=stream_weight,
             ):
                 yield example.inputs, example.labels, example.mask
 

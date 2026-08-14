@@ -273,9 +273,17 @@ def _temporal_features(
     return features
 
 
+# Every trained placement model learned a six-wide tier selector. Master and
+# Legendary postdate them, so they are conditioned as the closest tier those
+# models know. Retraining placement on eight tiers would widen this.
+_PLACEMENT_TIER_KEYS = STANDARD_DIFFICULTY_KEYS[:6]
+_PLACEMENT_TIER_ALIASES = {"master": "expert-plus", "legendary": "expert-plus"}
+
+
 def _tier_one_hot(difficulty_tier: str) -> tuple[float, ...]:
     key = standard_difficulty(difficulty_tier).key
-    return tuple(1.0 if name == key else 0.0 for name in STANDARD_DIFFICULTY_KEYS)
+    key = _PLACEMENT_TIER_ALIASES.get(key, key)
+    return tuple(1.0 if name == key else 0.0 for name in _PLACEMENT_TIER_KEYS)
 
 
 def _v2_features(

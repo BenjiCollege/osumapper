@@ -49,8 +49,30 @@ SUCCESS = "#42c89a"
 ERROR = "#ff6b7a"
 DEFAULT_RHYTHM_MODEL = "rhythm-conformer-v5-curated-run1-seed-2026"
 DEFAULT_V6_TRAINING_MODEL = "rhythm-conformer-v6-curated-657-songs-seed-2026"
-DEFAULT_PLACEMENT_MODEL = "placement-v3"
-LEGACY_PLACEMENT_MODEL = "placement-v2"
+DEFAULT_PLACEMENT_MODEL = "placement-v4"
+LEGACY_PLACEMENT_MODEL = "placement-v3"
+# Ranked by measured held-out quality, best first, so the interface can default
+# to the strongest trained model rather than the newest one. Conformer-v6 leads
+# v7 deliberately: v7's stream-aware training scored 0.7542 F1 against v6's
+# 0.7607, and the stream recall it bought is already available at no accuracy
+# cost from stream-preserving selection.
+RHYTHM_PREFERENCE = (
+    "conformer-v6",
+    "conformer-v7",
+    "conformer-v5",
+    "conformer-v4",
+    "conformer-v3",
+    "conformer-v2",
+    "transformer-v1",
+)
+# Placement-v4 reproduces human stacking and spacing spread; v3 leads v2 on jump
+# distance; v1 could not place spinners.
+PLACEMENT_PREFERENCE = (
+    "placement-v4",
+    "placement-v3",
+    "placement-v2",
+    "placement-v1",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,30 +136,62 @@ def summarize_process_error(message: str | None) -> str:
     return normalized if len(normalized) <= 110 else f"{normalized[:107]}…"
 
 
+def _model_architecture(model: Path) -> str:
+    """Read the architecture a trained model recorded for itself."""
+
+    _, config_path = model_bundle_paths(model)
+    config = read_json(config_path, default=None)
+    if not isinstance(config, dict):
+        return ""
+    recorded = (
+        config.get("architecture")
+        or config.get("model_kind")
+        or config.get("training", {}).get("architecture")
+    )
+    return str(recorded) if recorded else ""
+
+
+def discover_models(root: Path, kind: str) -> list[Path]:
+    """List trained models of one kind, best first.
+
+    Folder names are chosen by whoever ran the training, so matching on a fixed
+    name found nothing once a run was named after its dataset. This reads the
+    architecture each model recorded and ranks by measured quality, which also
+    lets the interface offer real choices instead of a path to type.
+    """
+
+    preference = RHYTHM_PREFERENCE if kind == "rhythm" else PLACEMENT_PREFERENCE
+    modern_root = root / "models" / "modern"
+    if not modern_root.is_dir():
+        return []
+    found: list[tuple[int, str, Path]] = []
+    for candidate in sorted(modern_root.iterdir(), key=lambda item: item.name.casefold()):
+        if not candidate.is_dir():
+            continue
+        model_file, config_file = model_bundle_paths(candidate)
+        if not (model_file.is_file() and config_file.is_file()):
+            continue
+        architecture = _model_architecture(candidate)
+        if architecture not in preference:
+            continue
+        found.append((preference.index(architecture), candidate.name.casefold(), candidate))
+    return [item[2] for item in sorted(found, key=lambda item: (item[0], item[1]))]
+
+
 def default_generation_models(root: Path) -> tuple[Path, Path]:
     modern_root = root / "models" / "modern"
     configured_rhythm = os.environ.get("OSUMAPPER_RHYTHM_MODEL")
     if configured_rhythm:
         rhythm = Path(configured_rhythm).expanduser()
     else:
-        trained_v6 = modern_root / DEFAULT_V6_TRAINING_MODEL
-        v6_model, v6_config = model_bundle_paths(trained_v6)
-        rhythm = (
-            trained_v6
-            if v6_model.is_file() and v6_config.is_file()
-            else modern_root / DEFAULT_RHYTHM_MODEL
-        )
+        discovered = discover_models(root, "rhythm")
+        rhythm = discovered[0] if discovered else modern_root / DEFAULT_RHYTHM_MODEL
     configured_placement = os.environ.get("OSUMAPPER_PLACEMENT_MODEL")
     if configured_placement:
         placement = Path(configured_placement).expanduser()
     else:
-        trained = modern_root / DEFAULT_PLACEMENT_MODEL
-        model_file, config_file = model_bundle_paths(trained)
-        placement = (
-            trained
-            if model_file.is_file() and config_file.is_file()
-            else modern_root / LEGACY_PLACEMENT_MODEL
-        )
+        discovered = discover_models(root, "placement")
+        placement = discovered[0] if discovered else modern_root / DEFAULT_PLACEMENT_MODEL
     return rhythm, placement
 
 
@@ -394,11 +448,15 @@ class OsumapperStudio:
         paths = DatasetPaths.at()
         dataset_config = read_json(paths.config, default={})
         default_rhythm_model, default_placement_model = default_generation_models(root)
+        self.rhythm_choices = discover_models(root, "rhythm")
+        self.placement_choices = discover_models(root, "placement")
         self.output_dir = tk.StringVar(value=str(root / "output"))
         self.preset = tk.StringVar(value="default")
         self.mode = tk.StringVar(value="standard")
         self.seed = tk.StringVar(value="2026")
-        self.flow_engine = tk.StringVar(value="deterministic")
+        self.flow_engine = tk.StringVar(
+            value="placement" if self.placement_choices else "deterministic"
+        )
         self.rhythm_engine = tk.StringVar(value="modern")
         self.modern_model = tk.StringVar(value=str(default_rhythm_model))
         self.placement_model = tk.StringVar(value=str(default_placement_model))
@@ -590,7 +648,7 @@ class OsumapperStudio:
             settings,
             text=(
                 "Precision automation first calibrates density, then locks the rhythm "
-                "and fine-tunes PatternPlanner spacing against your installed osu!lazer. "
+                "and fine-tunes spacing against your installed osu!lazer. "
                 "The rosu option is a legacy approximation for systems without lazer."
             ),
             style="Muted.TLabel",
@@ -608,13 +666,21 @@ class OsumapperStudio:
             settings,
             text=(
                 "Easy 0.0–1.99★  •  Normal 2.0–2.69★  •  Hard 2.7–3.99★\n"
-                "Insane 4.0–5.29★  •  Expert 5.3–6.49★  •  Expert+ 6.5★+"
+                "Insane 4.0–5.29★  •  Expert 5.3–6.49★  •  Expert+ 6.5–7.99★\n"
+                "Master 8.0–8.99★  •  Legendary 9.0★+  (both experimental)"
             ),
             style="CardText.TLabel",
             wraplength=390,
         ).pack(anchor="w", pady=(2, 7))
-        self._entry_row(settings, "Modern model", self.modern_model)
-        self._entry_row(settings, "Placement model (optional)", self.placement_model)
+        self._model_row(settings, "Rhythm model", self.modern_model, self.rhythm_choices)
+        self._model_row(settings, "Placement model", self.placement_model, self.placement_choices)
+        ttk.Label(
+            settings,
+            text=self._model_summary(),
+            style="Muted.TLabel",
+            wraplength=390,
+            justify="left",
+        ).pack(fill="x", pady=(0, 5))
         ttk.Label(
             settings,
             text=(
@@ -721,8 +787,9 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Conformer-v6 shares one multi-scale music encoder across six monotonically "
-                "nested osu!standard rhythm heads, trained with a hard-negative focal objective."
+                "Conformer-v6 is the measured best rhythm model (F1 0.761 on held-out songs). "
+                "Conformer-v7 adds stream weighting plus Master and Legendary heads, but "
+                "scored lower (0.754); train it only to experiment."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -733,6 +800,7 @@ class OsumapperStudio:
             self.train_architecture,
             (
                 "conformer-v6",
+                "conformer-v7",
                 "conformer-v5",
                 "conformer-v4",
                 "conformer-v3",
@@ -790,9 +858,9 @@ class OsumapperStudio:
         ttk.Label(
             model,
             text=(
-                "Placement-v3 keeps v2's tier conditioning, position anchoring, repeats, and hold "
-                "length, but restores squared error on jump distance so the model commits to "
-                "real spacing instead of averaging. Train each into its own folder."
+                "Placement-v4 is the measured best: it samples a learned spacing "
+                "distribution, so it reproduces human stacking that earlier versions "
+                "could never produce. Train each architecture into its own folder."
             ),
             style="CardText.TLabel",
             wraplength=410,
@@ -801,7 +869,7 @@ class OsumapperStudio:
             model,
             "Placement model",
             self.placement_architecture,
-            ("placement-v3", "placement-v2", "placement-v1"),
+            ("placement-v4", "placement-v3", "placement-v2", "placement-v1"),
         )
         self._entry_row(model, "Placement output", self.placement_output)
         ttk.Button(
@@ -819,7 +887,7 @@ class OsumapperStudio:
     def _sync_placement_output(self, *_args: object) -> None:
         """Keep each placement architecture in its own folder by default."""
         current = Path(self.placement_output.get().strip() or ".")
-        if current.name in {"placement-v1", "placement-v2", "placement-v3"}:
+        if current.name in {"placement-v1", "placement-v2", "placement-v3", "placement-v4"}:
             self.placement_output.set(str(current.with_name(self.placement_architecture.get())))
 
     def _sync_target_stars(self, *_args: object) -> None:
@@ -898,6 +966,50 @@ class OsumapperStudio:
         ttk.Combobox(row, textvariable=variable, values=values, state="readonly").pack(
             side="left", fill="x", expand=True
         )
+
+    def _model_row(
+        self,
+        parent: Any,
+        label: str,
+        variable: tk.StringVar,
+        choices: list[Path],
+    ) -> None:
+        """Offer the trained models found on disk, best first, still editable.
+
+        Model folders are named by whoever trained them, so a free-text path was
+        effectively a memory test. The dropdown lists what actually exists and
+        stays editable for a model kept somewhere else.
+        """
+
+        row = ttk.Frame(parent, style="Card.TFrame")
+        row.pack(fill="x", pady=3)
+        ttk.Label(row, text=label, style="CardText.TLabel", width=15).pack(side="left")
+        values = [str(path) for path in choices]
+        combo = ttk.Combobox(row, textvariable=variable, values=values)
+        combo.pack(side="left", fill="x", expand=True)
+        if not values:
+            ttk.Label(row, text="none trained", style="Muted.TLabel").pack(side="left", padx=(6, 0))
+
+    def _model_summary(self) -> str:
+        rhythm = Path(self.modern_model.get().strip() or ".")
+        placement = Path(self.placement_model.get().strip() or ".")
+        parts = []
+        for name, path in (("Rhythm", rhythm), ("Placement", placement)):
+            model_file, config_file = model_bundle_paths(path)
+            if model_file.is_file() and config_file.is_file():
+                architecture = _model_architecture(path) or "unknown architecture"
+                calibrated = ""
+                if name == "Rhythm":
+                    config = read_json(config_file, default={})
+                    calibrated = (
+                        ", calibrated"
+                        if isinstance(config, dict) and "calibration" in config
+                        else ", NOT calibrated"
+                    )
+                parts.append(f"{name}: {architecture}{calibrated}")
+            else:
+                parts.append(f"{name}: not trained yet")
+        return "  •  ".join(parts)
 
     @staticmethod
     def _path_row(parent: Any, label: str, variable: tk.StringVar, command: Any) -> None:

@@ -49,10 +49,19 @@ STANDARD_DIFFICULTIES: tuple[StandardDifficulty, ...] = (
     StandardDifficulty("hard", "Hard", 2.7, 4.0, 3.35, 2.70, 5.0, 4.0, 7.0, 8.0),
     StandardDifficulty("insane", "Insane", 4.0, 5.3, 4.65, 3.60, 6.0, 4.0, 8.0, 9.0),
     StandardDifficulty("expert", "Expert", 5.3, 6.5, 5.90, 4.35, 6.5, 4.0, 9.0, 9.5),
-    StandardDifficulty("expert-plus", "Expert+", 6.5, None, 7.00, 5.85, 7.0, 4.0, 9.5, 10.0),
+    StandardDifficulty("expert-plus", "Expert+", 6.5, 8.0, 7.00, 5.85, 7.0, 4.0, 9.5, 10.0),
+    # Master and Legendary use the measured medians of the 8-9 and 9+ bands.
+    # Note that HP drain falls as difficulty rises (5.0 -> 4.2 -> 3.6): mappers
+    # keep extreme maps survivable rather than compounding drain with density.
+    StandardDifficulty("master", "Master", 8.0, 9.0, 8.30, 6.47, 4.2, 4.0, 9.7, 10.0),
+    StandardDifficulty("legendary", "Legendary", 9.0, None, 9.50, 7.09, 3.6, 4.0, 10.0, 10.0),
 )
 
 STANDARD_DIFFICULTY_KEYS = tuple(profile.key for profile in STANDARD_DIFFICULTIES)
+# The six tiers a default --full-set produces. Master and Legendary are
+# reachable only on songs with the material to support them, so requiring them
+# would fail otherwise-valid packages; --full-set-tiers all opts in.
+FULL_SET_DIFFICULTIES = STANDARD_DIFFICULTIES[:6]
 STAR_TARGET_TOLERANCE = 0.25
 STAR_DIFFICULTY_FEATURES = ("target_star_rating", "difficulty_tier")
 V5_DIFFICULTY_FEATURES = (
@@ -64,11 +73,23 @@ V5_DIFFICULTY_FEATURES = (
     "tier_expert",
     "tier_expert_plus",
 )
+# Conformer-v7 adds the Master and Legendary heads, so its one-hot tier selector
+# is two features wider. V5/V6 models keep their own feature list and stay
+# loadable; the recorded difficulty_features in each config decides which is used.
+V7_DIFFICULTY_FEATURES = (
+    *V5_DIFFICULTY_FEATURES,
+    "tier_master",
+    "tier_legendary",
+)
 LEGACY_DIFFICULTY_FEATURES = ("OD", "AR", "CS", "objects_per_second")
 
 
 def is_star_conditioned(features: tuple[str, ...]) -> bool:
-    return features in {STAR_DIFFICULTY_FEATURES, V5_DIFFICULTY_FEATURES}
+    return features in {
+        STAR_DIFFICULTY_FEATURES,
+        V5_DIFFICULTY_FEATURES,
+        V7_DIFFICULTY_FEATURES,
+    }
 
 
 def standard_difficulty(value: str) -> StandardDifficulty:

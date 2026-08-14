@@ -10,6 +10,7 @@ from osumapper.beatmap import BeatmapDocument
 from osumapper.config import GameMode, GenerationConfig, PresetSpec
 from osumapper.criteria import audit_standard_criteria
 from osumapper.difficulty import (
+    FULL_SET_DIFFICULTIES,
     STANDARD_DIFFICULTIES,
     STAR_TARGET_TOLERANCE,
     StandardDifficulty,
@@ -39,6 +40,8 @@ _MAX_FLOW_SCALE = {
     "insane": 2.7,
     "expert": 3.25,
     "expert-plus": 3.75,
+    "master": 3.9,
+    "legendary": 4.0,
 }
 _NESTED_RHYTHM_ARCHITECTURES = {"conformer-v6"}
 _GAMEPLAY_BLOCKING_CRITERIA = {
@@ -78,6 +81,7 @@ class GenerationRequest:
     star_precision: float = FULL_SET_DEFAULT_STAR_PRECISION
     calibration_attempts: int = FULL_SET_DEFAULT_MAX_ATTEMPTS
     star_calculator: str = "auto"
+    full_set_tiers: str = "core"
 
 
 @dataclass(frozen=True, slots=True)
@@ -779,6 +783,7 @@ def _write_full_set_reports(
     progress: Progress,
     star_calculator: StandardStarCalculator,
     base_config: GenerationConfig,
+    set_profiles: tuple[Any, ...] = STANDARD_DIFFICULTIES,
 ) -> None:
     timing_sections = {
         tuple(result.document.sections().get("TimingPoints", [])) for result in results
@@ -829,8 +834,8 @@ def _write_full_set_reports(
         "package": str(output),
         "seed": seed,
         "generated_difficulties": len(results),
-        "expected_difficulties": len(STANDARD_DIFFICULTIES),
-        "complete": len(results) == len(STANDARD_DIFFICULTIES),
+        "expected_difficulties": len(set_profiles),
+        "complete": len(results) == len(set_profiles),
         "shared_audio_analysis": True,
         "identical_timing_sections": len(timing_sections) == 1,
         "rhythm_architecture": rhythm_architecture,
@@ -888,6 +893,11 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
         raise InputError("Star calculator must be auto, lazer, or rosu.")
     if request.flow_engine == "placement" and request.rhythm_engine != "modern":
         raise InputError("Placement-v1 requires --rhythm-engine modern.")
+    if request.full_set_tiers not in {"core", "all"}:
+        raise InputError("Full-set tiers must be core or all.")
+    set_profiles = (
+        STANDARD_DIFFICULTIES if request.full_set_tiers == "all" else FULL_SET_DIFFICULTIES
+    )
     if request.full_set:
         if request.rhythm_engine != "modern":
             raise InputError("FullSet-v1 requires --rhythm-engine modern.")
@@ -950,7 +960,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
 
         if request.full_set:
             progress("Starting FullSet-v1 shared six-difficulty generation")
-            for profile in STANDARD_DIFFICULTIES:
+            for profile in set_profiles:
                 result = _generate_full_set_difficulty(
                     workspace.document,
                     workspace.audio,
@@ -1012,7 +1022,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
             write_osz(workspace.root, output, exclude=excluded)
             validate_osz(
                 output,
-                expected_osu_count=len(STANDARD_DIFFICULTIES),
+                expected_osu_count=len(set_profiles),
                 expected_audio_count=1,
             )
         else:
@@ -1092,6 +1102,7 @@ def generate_package(request: GenerationRequest, *, progress: Progress = print) 
             progress,
             star_calculator,
             config,
+            set_profiles,
         )
     elif criteria_report is not None:
         report_path = output.with_name(f"{output.stem}.criteria.json")

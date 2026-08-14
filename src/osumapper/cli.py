@@ -23,6 +23,7 @@ from osumapper.difficulty import (
     STANDARD_DIFFICULTY_KEYS,
     STAR_DIFFICULTY_FEATURES,
     V5_DIFFICULTY_FEATURES,
+    V7_DIFFICULTY_FEATURES,
 )
 from osumapper.errors import OsumapperError
 from osumapper.lazer import find_lazer_executable
@@ -176,6 +177,15 @@ def _build_parser() -> argparse.ArgumentParser:
             "installed lazer, or the legacy rosu approximation"
         ),
     )
+    generate.add_argument(
+        "--full-set-tiers",
+        choices=("core", "all"),
+        default="core",
+        help=(
+            "core generates Easy through Expert+; all adds Master and Legendary, which "
+            "only songs with the material to support them can reach"
+        ),
+    )
     generate.add_argument("--bpm", type=float, help="tempo for audio-only input")
     generate.add_argument("--offset", type=int, help="timing offset in milliseconds")
     generate.add_argument(
@@ -289,8 +299,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-v4",
             "conformer-v5",
             "conformer-v6",
+            "conformer-v7",
         ),
-        default="conformer-v6",
+        default="conformer-v7",
     )
     dataset_windows.add_argument("--rebuild", action="store_true")
 
@@ -346,8 +357,18 @@ def _build_parser() -> argparse.ArgumentParser:
             "conformer-v4",
             "conformer-v5",
             "conformer-v6",
+            "conformer-v7",
         ),
-        default="conformer-v6",
+        default="conformer-v7",
+    )
+    train_rhythm_parser.add_argument(
+        "--stream-weight",
+        type=float,
+        default=2.0,
+        help=(
+            "training weight for hit objects inside a quarter-beat run; 1.0 disables "
+            "stream-aware weighting (default: 2.0)"
+        ),
     )
     train_rhythm_parser.add_argument(
         "--audio-context-radius",
@@ -486,6 +507,7 @@ def _generate(args: argparse.Namespace) -> int:
             star_precision=args.star_precision,
             calibration_attempts=args.calibration_attempts,
             star_calculator=args.star_calculator,
+            full_set_tiers=args.full_set_tiers,
             audio=args.audio,
             bpm=args.bpm,
             offset_ms=args.offset,
@@ -669,6 +691,7 @@ def _dataset(args: argparse.Namespace) -> int:
             "conformer-v4": STAR_DIFFICULTY_FEATURES,
             "conformer-v5": V5_DIFFICULTY_FEATURES,
             "conformer-v6": V5_DIFFICULTY_FEATURES,
+            "conformer-v7": V7_DIFFICULTY_FEATURES,
         }.get(args.architecture, LEGACY_DIFFICULTY_FEATURES)
         for split in ("train", "validation", "test"):
             rows = load_split(split, dataset_root=args.data_root)
@@ -729,6 +752,7 @@ def _train(args: argparse.Namespace) -> int:
             weight_decay=args.weight_decay,
             window_cache=args.window_cache,
             balance_songs=not args.no_balance_songs,
+            stream_weight=args.stream_weight,
         )
         result = train_rhythm(
             dataset_root=args.data_root,

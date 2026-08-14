@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -12,6 +13,7 @@ from osumapper.ui import (
     default_generation_models,
     default_training_model,
     discover_inputs,
+    discover_models,
     model_bundle_paths,
     normalize_input_path,
     summarize_process_error,
@@ -20,18 +22,67 @@ from osumapper.ui import (
 
 
 class UiHelperTests(unittest.TestCase):
-    def test_untrained_defaults_fall_back_to_the_previous_models(self) -> None:
-        with patch.dict(os.environ, {}, clear=True):
-            rhythm, placement = default_generation_models(Path("/home/test/osumapper"))
+    @staticmethod
+    def _write_model(root: Path, name: str, architecture: str) -> Path:
+        """Create a model folder the way training leaves one behind."""
+        folder = root / "models" / "modern" / name
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "model.keras").touch()
+        (folder / "config.json").write_text(
+            json.dumps({"architecture": architecture}), encoding="utf-8"
+        )
+        return folder
 
-        self.assertEqual(
-            rhythm,
-            Path("/home/test/osumapper/models/modern/rhythm-conformer-v5-curated-run1-seed-2026"),
-        )
-        self.assertEqual(
-            placement,
-            Path("/home/test/osumapper/models/modern/placement-v2"),
-        )
+    def test_untrained_defaults_name_a_model_to_train(self) -> None:
+        with tempfile.TemporaryDirectory() as name, patch.dict(os.environ, {}, clear=True):
+            rhythm, placement = default_generation_models(Path(name))
+
+        self.assertEqual(rhythm.name, "rhythm-conformer-v5-curated-run1-seed-2026")
+        self.assertEqual(placement.name, "placement-v4")
+
+    def test_models_are_discovered_by_recorded_architecture_not_folder_name(self) -> None:
+        # Training names folders after the dataset and seed, so matching a fixed
+        # folder name silently found nothing and the interface offered a path
+        # that did not exist.
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            self._write_model(
+                root, "rhythm-conformer-v6-curated-657-songs-seed-2026", "conformer-v6"
+            )
+            self._write_model(root, "placement-v4-657-seed-2026", "placement-v4")
+            with patch.dict(os.environ, {}, clear=True):
+                rhythm, placement = default_generation_models(root)
+
+        self.assertEqual(rhythm.name, "rhythm-conformer-v6-curated-657-songs-seed-2026")
+        self.assertEqual(placement.name, "placement-v4-657-seed-2026")
+
+    def test_the_measured_best_model_wins_over_the_newest(self) -> None:
+        # Conformer-v7 is newer but scored lower on the held-out split, so the
+        # default must follow measured quality rather than version order.
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            self._write_model(root, "rhythm-conformer-v7-streams-657-seed-2026", "conformer-v7")
+            best = self._write_model(root, "rhythm-conformer-v6-curated-657", "conformer-v6")
+            self._write_model(root, "placement-v3-657-seed-2026", "placement-v3")
+            top = self._write_model(root, "placement-v4-657-seed-2026", "placement-v4")
+            with patch.dict(os.environ, {}, clear=True):
+                rhythm, placement = default_generation_models(root)
+                ordered = discover_models(root, "rhythm")
+
+        self.assertEqual(rhythm, best)
+        self.assertEqual(placement, top)
+        self.assertEqual([item.name for item in ordered][0], best.name)
+
+    def test_incomplete_model_folders_are_not_offered(self) -> None:
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            partial = root / "models" / "modern" / "rhythm-interrupted"
+            partial.mkdir(parents=True)
+            (partial / "model.keras").touch()  # no config.json: training died early
+            with patch.dict(os.environ, {}, clear=True):
+                found = discover_models(root, "rhythm")
+
+        self.assertEqual(found, [])
 
     def test_model_bundle_accepts_folder_or_keras_file(self) -> None:
         folder_model, folder_config = model_bundle_paths(Path("/models/v5"))
@@ -52,30 +103,6 @@ class UiHelperTests(unittest.TestCase):
                 "/home/test/osumapper/models/modern/rhythm-conformer-v6-curated-657-songs-seed-2026"
             ),
         )
-
-    def test_completed_v6_becomes_the_generation_default(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            v6 = root / "models" / "modern" / "rhythm-conformer-v6-curated-657-songs-seed-2026"
-            v6.mkdir(parents=True)
-            (v6 / "model.keras").touch()
-            (v6 / "config.json").write_text("{}", encoding="utf-8")
-            with patch.dict(os.environ, {}, clear=True):
-                rhythm, _placement = default_generation_models(root)
-
-        self.assertEqual(rhythm, v6)
-
-    def test_trained_placement_v3_supersedes_the_previous_placement_model(self) -> None:
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            placement_v3 = root / "models" / "modern" / "placement-v3"
-            placement_v3.mkdir(parents=True)
-            (placement_v3 / "model.keras").touch()
-            (placement_v3 / "config.json").write_text("{}", encoding="utf-8")
-            with patch.dict(os.environ, {}, clear=True):
-                _rhythm, placement = default_generation_models(root)
-
-        self.assertEqual(placement, placement_v3)
 
     def test_star_calibration_failure_is_summarized_for_queue_row(self) -> None:
         summary = summarize_process_error(

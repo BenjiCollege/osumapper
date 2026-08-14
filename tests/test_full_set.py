@@ -11,6 +11,7 @@ import numpy as np
 
 from osumapper.config import GameMode
 from osumapper.difficulty import (
+    FULL_SET_DIFFICULTIES,
     STANDARD_DIFFICULTIES,
     apply_standard_difficulty,
     standard_difficulty,
@@ -294,7 +295,7 @@ class FullSetTests(unittest.TestCase):
                 "structural_error_occurrences": 0,
             },
         }
-        targets = [profile.default_stars for profile in STANDARD_DIFFICULTIES]
+        targets = [profile.default_stars for profile in FULL_SET_DIFFICULTIES]
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             source = root / "standard.osu"
@@ -334,7 +335,7 @@ class FullSetTests(unittest.TestCase):
             self.assertEqual(set_report["requested_star_precision"], 0.03)
             self.assertEqual(set_report["placement_engine"], "pattern-planner-v1")
             self.assertFalse(set_report["difficulty_nesting_enforced"])
-            for profile in STANDARD_DIFFICULTIES:
+            for profile in FULL_SET_DIFFICULTIES:
                 self.assertTrue((root / f"full-set.{profile.key}.criteria.json").is_file())
 
     def test_report_describes_the_models_that_actually_produced_the_package(self) -> None:
@@ -355,7 +356,7 @@ class FullSetTests(unittest.TestCase):
             "issues": [],
             "summary": {"errors": 0, "warnings": 0, "structural_error_occurrences": 0},
         }
-        targets = [profile.default_stars for profile in STANDARD_DIFFICULTIES]
+        targets = [profile.default_stars for profile in FULL_SET_DIFFICULTIES]
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             source = root / "standard.osu"
