@@ -169,11 +169,13 @@ def prepare_source(
             selected_mode = mode or GameMode.STANDARD
             target_audio = root / source.name
             shutil.copy2(source, target_audio)
-            estimate = None if bpm is not None else estimate_timing(target_audio)
-            chosen_bpm = bpm if bpm is not None else estimate.bpm
-            chosen_offset = (
-                offset_ms if offset_ms is not None else (estimate.offset_ms if estimate else 0)
-            )
+            if bpm is not None and offset_ms is not None:
+                chosen_bpm, chosen_offset = bpm, offset_ms
+            else:
+                # A given BPM still needs its offset found; offset 0 is almost never right.
+                estimate = estimate_timing(target_audio, bpm=bpm)
+                chosen_bpm = bpm if bpm is not None else estimate.bpm
+                chosen_offset = offset_ms if offset_ms is not None else estimate.offset_ms
             text = create_timed_beatmap(
                 target_audio.name,
                 mode=selected_mode,

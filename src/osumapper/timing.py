@@ -7,6 +7,17 @@ from typing import Any
 from osumapper.config import GameMode
 from osumapper.errors import DependencyError, InputError
 
+# librosa's onset envelope peaks after the sound it marks, so a grid fitted to it
+# lands late. Calibrated against human-timed maps: the fitted offset was a median
+# 36-39 ms late on validation, test and train songs alike, mp3 and ogg. Tied to
+# onset_strength's defaults (hop 256, n_fft 2048); recalibrate if those change.
+ONSET_LAG_MS = 38
+
+# beat_track assumes 120 BPM unless told otherwise. Mapped songs sit around 169,
+# and the 120 prior returned half or two-thirds tempo on ~45% of held-out songs;
+# 150 gets the octave right on 76-85% of them.
+TEMPO_PRIOR_BPM = 150.0
+
 
 @dataclass(frozen=True, slots=True)
 class TimingEstimate:
@@ -15,8 +26,11 @@ class TimingEstimate:
     confidence: str
 
 
-def estimate_timing(audio: Path) -> TimingEstimate:
-    """Estimate a single timing section using maintained, cross-platform librosa APIs."""
+def estimate_timing(audio: Path, *, bpm: float | None = None) -> TimingEstimate:
+    """Estimate a single timing section using maintained, cross-platform librosa APIs.
+
+    With ``bpm`` given, only the offset is searched, at exactly that tempo.
+    """
     try:
         import librosa
         import numpy as np
@@ -32,22 +46,36 @@ def estimate_timing(audio: Path) -> TimingEstimate:
     if signal.size == 0:
         raise InputError(f"Audio file is empty: {audio}")
 
-    tempo, beat_frames = librosa.beat.beat_track(y=signal, sr=sample_rate, units="frames")
-    tempo_value = float(np.asarray(tempo).reshape(-1)[0])
-    if not np.isfinite(tempo_value) or tempo_value <= 0:
-        raise InputError("Automatic timing could not find a stable tempo; provide --bpm.")
-    if len(beat_frames):
-        beat_times = librosa.frames_to_time(beat_frames, sr=sample_rate)
-        offset = int(round(float(beat_times[0]) * 1000))
-        confidence = "beat-tracked"
+    if bpm is not None:
+        if not bpm > 0:
+            raise InputError("BPM must be greater than zero.")
+        tempo_value, offset, confidence = float(bpm), 0, "tempo-only"
     else:
-        offset = 0
-        confidence = "tempo-only"
+        tempo, beat_frames = librosa.beat.beat_track(
+            y=signal, sr=sample_rate, units="frames", start_bpm=TEMPO_PRIOR_BPM
+        )
+        tempo_value = float(np.asarray(tempo).reshape(-1)[0])
+        if not np.isfinite(tempo_value) or tempo_value <= 0:
+            raise InputError("Automatic timing could not find a stable tempo; provide --bpm.")
+        if len(beat_frames):
+            beat_times = librosa.frames_to_time(beat_frames, sr=sample_rate)
+            offset = int(round(float(beat_times[0]) * 1000))
+            confidence = "beat-tracked"
+        else:
+            offset = 0
+            confidence = "tempo-only"
 
-    refined = _refine_timing(signal, sample_rate, tempo_value, librosa, np)
+    refined = _refine_timing(
+        signal, sample_rate, tempo_value, librosa, np, fixed_bpm=bpm is not None
+    )
     if refined is not None:
         tempo_value, offset = refined
         confidence = "onset-aligned"
+    if confidence != "tempo-only":
+        offset -= ONSET_LAG_MS
+        if offset < 0:
+            # One beat later keeps the grid on the same ticks and the offset legal.
+            offset = int(round(offset + 60_000.0 / tempo_value))
     return TimingEstimate(bpm=round(tempo_value, 6), offset_ms=offset, confidence=confidence)
 
 
@@ -57,20 +85,25 @@ def _refine_timing(
     seed_bpm: float,
     librosa: Any,
     np: Any,
+    *,
+    fixed_bpm: bool = False,
 ) -> tuple[float, int] | None:
     """Search tempo and offset near the seed for the grid the music sits on.
 
     Beat tracking returns tempo to a precision that is fine for analysis and far
     too coarse for mapping: a 1.4 BPM error is about 3ms per beat, so a map that
     starts on the beat is a whole beat adrift minutes later, which is heard as
-    notes that drift off tempo. Measured on six songs, the raw estimate put real
-    onsets a median 20-40ms from the nearest quarter-beat tick; refining brings
-    that to 6-15ms and lands every song on a whole or half BPM, where real music
-    almost always sits.
+    notes that drift off tempo. Refining lands songs on a whole or half BPM,
+    where real music almost always sits. With ``fixed_bpm`` only the offset is
+    searched.
 
-    The octave is left as beat tracking chose it. A doubled or halved grid shares
-    tick positions, so the octave does not move notes off the beat, and octave
-    correction is a separate and much harder problem.
+    The offset returned is aligned to the onset envelope, which lags the audio;
+    the caller removes that lag (``ONSET_LAG_MS``). It is searched within one
+    beat, so which beat starts the bar is not determined here.
+
+    The octave is left as the seed chose it. It matters: BPM is a rhythm-model
+    input and a doubled grid relabels beats as half-beats, so slow songs can
+    need an explicit --bpm.
     """
 
     hop = 256
@@ -95,12 +128,16 @@ def _refine_timing(
         coverage = min(1.0, float(np.sqrt(2.0 * np.pi)) * window / beat_ms)
         return captured / max(total * coverage, 1e-9)
 
-    candidates = sorted(
-        {round(float(value), 3) for value in np.arange(seed_bpm - 6.0, seed_bpm + 6.01, 0.05)}
-        | {
-            float(value)
-            for value in np.arange(round(seed_bpm) - 6.0, round(seed_bpm) + 6.01, 0.5)
-        }
+    candidates = (
+        [seed_bpm]
+        if fixed_bpm
+        else sorted(
+            {round(float(value), 3) for value in np.arange(seed_bpm - 6.0, seed_bpm + 6.01, 0.05)}
+            | {
+                float(value)
+                for value in np.arange(round(seed_bpm) - 6.0, round(seed_bpm) + 6.01, 0.5)
+            }
+        )
     )
     best: tuple[float, float, float] | None = None
     for bpm in candidates:

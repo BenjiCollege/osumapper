@@ -77,6 +77,13 @@ class TimingRefinementTests(unittest.TestCase):
                 stream.writeframes(samples.tobytes())
 
             estimate = estimate_timing(path)
+            given = estimate_timing(path, bpm=bpm)
+
+        # A given BPM is kept exactly and its offset is still searched, landing on a
+        # legal position within the first beat (never the old silent offset 0).
+        self.assertEqual(given.bpm, bpm)
+        self.assertEqual(given.confidence, "onset-aligned")
+        self.assertTrue(0 <= given.offset_ms < 60_000 / bpm, given.offset_ms)
 
         multiples = (bpm / 2, bpm, bpm * 2)
         self.assertTrue(
